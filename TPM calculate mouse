@@ -1,0 +1,183 @@
+# ==============================================================================
+# 综合处理脚本：Counts分离 -> 长度计算 -> Symbol转换 -> TPM计算
+# (针对小鼠数据优化版)
+# ==============================================================================
+
+library(data.table)
+library(dplyr)
+library(rtracklayer)
+library(GenomicRanges)
+
+# ==============================
+# 1. 参数与路径设置
+# ==============================
+# 输入文件
+counts_file <- "Phf8_counts.csv"
+
+# 注释文件路径 (请确保这些路径在你的 R 环境中可访问)
+# 注意：如果你在 Windows RStudio 运行，建议将 \\wsl.localhost 映射为网络驱动器，或者确路径无误
+gene_gtf_path <- "\\\\wsl.localhost\\Ubuntu\\home\\qiuzerui\\annotationMv38\\gencode.vM38.annotation_PRI.gtf"
+te_gtf_path   <- "\\\\wsl.localhost\\Ubuntu\\home\\qiuzerui\\annotationMv38\\m39_TE.gtf"
+
+# 输出文件
+output_file <- "Phf8_final_counts_tpm.csv"
+
+# ==============================
+# 2. 读取并拆分 Counts 数据
+# ==============================
+message(paste0("[", Sys.time(), "] 正在读取 Counts 文件..."))
+counts_df <- fread(counts_file)
+
+# 拆分 Gene 和 TE
+# [修改点 1] 针对小鼠数据，将 ENSG 改为 ENSMUSG
+# 你的数据中基因 ID 格式如：ENSMUSG00000000001.5
+gene_counts <- counts_df[grep("^ENSMUSG", counts_df$RepeatID), ]
+te_counts   <- counts_df[grep(":", counts_df$RepeatID), ]
+
+message(paste("   - 识别到 Gene 行数:", nrow(gene_counts)))
+message(paste("   - 识别到 TE 行数:  ", nrow(te_counts)))
+
+if(nrow(gene_counts) == 0) {
+  stop("错误：未识别到基因行！请检查 grep 正则表达式是否与 ID 格式匹配。")
+}
+
+# ==============================
+# 3. 处理 Gene 部分 (长度 + Symbol)
+# ==============================
+message(paste0("[", Sys.time(), "] 正在处理 Gene 注释 (这可能需要几分钟)..."))
+
+# 3.1 读取 Gene GTF 并提取 Symbol
+gene_gtf <- import(gene_gtf_path)
+
+# [建议] 提取 gene_id 和 gene_name
+# 确保 GTF 中的 gene_id 格式与 Counts 中的 RepeatID 格式一致（是否都包含 .版本号）
+gene_map <- unique(as.data.frame(mcols(gene_gtf)[, c("gene_id", "gene_name")]))
+
+# 3.2 计算 Gene 有效长度 (Union Exon Length)
+gene_exons <- gene_gtf[gene_gtf$type == "exon"]
+gene_exons_list <- split(gene_exons, mcols(gene_exons)$gene_id)
+gene_widths <- sum(width(reduce(gene_exons_list)))
+
+gene_len_df <- data.frame(
+  gene_id = names(gene_widths),
+  length = as.numeric(gene_widths),
+  stringsAsFactors = FALSE
+)
+
+# 3.3 合并信息到 Gene Counts
+# 合并长度
+gene_counts_processed <- left_join(gene_counts, gene_len_df, by = c("RepeatID" = "gene_id"))
+
+# [检查点] 检查是否有大量基因未匹配到长度 (Length = NA)
+na_genes <- sum(is.na(gene_counts_processed$length))
+if (na_genes > nrow(gene_counts) * 0.5) {
+  warning("警告：超过 50% 的基因未匹配到长度！可能是 ID 版本号不匹配（如 .1 vs .2）。")
+  # 如果发生这种情况，你可能需要去除版本号再 join，例如：
+  # gene_counts$clean_id <- sub("\\..*", "", gene_counts$RepeatID)
+  # gene_len_df$clean_id <- sub("\\..*", "", gene_len_df$gene_id)
+  # 然后用 clean_id 进行 join
+}
+
+# 合并 Symbol
+gene_counts_processed <- left_join(gene_counts_processed, gene_map, by = c("RepeatID" = "gene_id"))
+
+# 转换 ID 为 Symbol
+# 优先使用 gene_name，如果为空则保留原 ID
+gene_counts_processed$RepeatID <- ifelse(
+  !is.na(gene_counts_processed$gene_name), 
+  gene_counts_processed$gene_name, 
+  gene_counts_processed$RepeatID
+)
+gene_counts_processed$gene_name <- NULL
+
+# ==============================
+# 4. 处理 TE 部分 (长度)
+# ==============================
+message(paste0("[", Sys.time(), "] 正在处理 TE 注释..."))
+
+# 4.1 读取 TE GTF
+te_gtf <- import(te_gtf_path)
+
+# 4.2 构建 TE 唯一 ID 并计算长度
+te_mcols <- mcols(te_gtf)
+
+# [修改点 2] 确认 GTF 列名
+# 确保 mcols(te_gtf) 中确实存在 family_id 和 class_id
+# 如果报错 "column not found"，请使用 names(te_mcols) 查看实际列名并调整
+if (!all(c("family_id", "class_id") %in% names(te_mcols))) {
+  warning("警告：TE GTF 中未找到 family_id 或 class_id 列，TE ID 构建可能失败！")
+  # 备选方案：如果只有 gene_id，直接使用 gene_id
+  # te_ids <- te_mcols$gene_id 
+} else {
+  te_ids <- paste(te_mcols$gene_id, te_mcols$family_id, te_mcols$class_id, sep = ":")
+}
+
+mcols(te_gtf)$te_unique_id <- te_ids
+
+te_list <- split(te_gtf, mcols(te_gtf)$te_unique_id)
+te_widths <- sum(width(reduce(te_list)))
+
+te_len_df <- data.frame(
+  te_id = names(te_widths),
+  length = as.numeric(te_widths),
+  stringsAsFactors = FALSE
+)
+
+# 4.3 合并长度到 TE Counts
+te_counts_processed <- left_join(te_counts, te_len_df, by = c("RepeatID" = "te_id"))
+
+# ==============================
+# 5. 合并数据并计算 TPM
+# ==============================
+message(paste0("[", Sys.time(), "] 正在合并数据并计算 TPM..."))
+
+# 5.1 上下合并
+final_df <- rbind(gene_counts_processed, te_counts_processed)
+
+# 5.2 移除长度缺失的行
+na_count <- sum(is.na(final_df$length))
+if (na_count > 0) {
+  warning(paste("注意：移除", na_count, "行未匹配到长度的数据（无法计算 TPM）。"))
+  final_df <- final_df[!is.na(final_df$length), ]
+}
+
+# 5.3 TPM 计算函数
+calculate_tpm <- function(counts, lengths) {
+  # 1. RPK
+  rpk <- counts / (lengths / 1000)
+  # 2. Scaling factor (Per sample)
+  scaling_factor <- sum(rpk, na.rm = TRUE) / 1e6
+  # 3. TPM
+  tpm <- rpk / scaling_factor
+  return(tpm)
+}
+
+# 识别样本列
+sample_cols <- setdiff(names(final_df), c("RepeatID", "length"))
+message(paste("识别到样本列:", paste(sample_cols, collapse = ", ")))
+
+# 计算 TPM
+for (col in sample_cols) {
+  tpm_col_name <- paste0(col, "_TPM")
+  final_df[[tpm_col_name]] <- calculate_tpm(final_df[[col]], final_df$length)
+}
+
+# ==============================
+# 6. 输出结果
+# ==============================
+tpm_cols <- grep("_TPM$", names(final_df), value = TRUE)
+
+message("正在验证 TPM 总和 (应接近 1,000,000):")
+print(colSums(final_df[, ..tpm_cols], na.rm = TRUE))
+
+# 格式化数据
+for (col in tpm_cols) {
+  final_df[[col]] <- round(final_df[[col]], 4)
+}
+
+# 导出文件
+write.csv(final_df, output_file, row.names = FALSE)
+
+message("========================================================")
+message(paste("处理完成！输出文件:", output_file))
+message("========================================================")
