@@ -1,0 +1,328 @@
+# ==============================================================================
+# 最终版 (小鼠 Phf20 数据适配 2x2)：TE/基因 通路分析流程
+# 1. ID 转换：使用 biomaRt (适配 Mouse Gencode)
+# 2. 物种调整：Human (hsa) -> Mouse (mmu)
+# 3. 样本设计：适配 4 个样本 (2 Scramble vs 2 Phf20_KO)
+# ==============================================================================
+
+# 1. 环境准备
+# ------------------------------------------------------------------------------
+library(DESeq2)
+library(clusterProfiler)
+# 加载小鼠注释库
+if (!require("org.Mm.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Mm.eg.db")
+}
+library(org.Mm.eg.db) 
+library(GSVA)
+library(GSEABase)
+library(enrichplot)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(pheatmap)
+library(msigdbr)
+library(BiocParallel)
+
+if (!require("biomaRt", quietly = TRUE)) {
+  stop("请先安装 biomaRt: BiocManager::install('biomaRt')")
+}
+
+register(SerialParam())
+
+# ==============================================================================
+# 2. 数据读取与清洗
+# ==============================================================================
+# [修改] 读取 Phf20 文件
+print("--- 正在读取数据 ---")
+counts_df <- read.csv("Phf20_TEcounts.csv", row.names = 1)
+
+# [修改] 识别小鼠基因 (ENSMUSG)
+# 注意：biomaRt 只能注释基因，不能注释 TE，所以这里我们只提取基因进行通路分析
+is_gene <- str_detect(rownames(counts_df), "^ENSMUSG")
+gene_counts <- counts_df[is_gene, ]
+
+print(paste("总行数:", nrow(counts_df)))
+print(paste("识别到的基因行数 (ENSMUSG):", nrow(gene_counts)))
+
+if (nrow(gene_counts) == 0) {
+  stop("错误：未检测到以 'ENSMUSG' 开头的基因 ID。请检查输入 CSV 的 rownames 是否正确。")
+}
+
+# 去除版本号 (例如 .5, .16)
+cleaned_ids <- str_split(rownames(gene_counts), "\\.", simplify = TRUE)[, 1]
+rownames(gene_counts) <- cleaned_ids
+
+# ==============================================================================
+# 2.1 ID 转换 (BiomaRt - Mouse)
+# ==============================================================================
+print("--- 开始 ID 转换 (Mouse) ---")
+gene_map <- NULL
+
+tryCatch({
+  # 使用小鼠数据集 (mmusculus_gene_ensembl)
+  mart <- useEnsembl("ensembl", dataset = "mmusculus_gene_ensembl", mirror = "asia")
+  print("正在查询 Ensembl 数据库 (Mouse)...")
+  
+  raw_map <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "mgi_symbol", "gene_biotype"),
+                   filters = "ensembl_gene_id",
+                   values = rownames(gene_counts),
+                   mart = mart)
+  
+  raw_map <- raw_map[!is.na(raw_map$entrezgene_id), ]
+  coding_genes <- raw_map[raw_map$gene_biotype == "protein_coding", ]
+  
+  gene_map <- data.frame(
+    ENSEMBL = coding_genes$ensembl_gene_id,
+    ENTREZID = as.character(coding_genes$entrezgene_id),
+    SYMBOL = coding_genes$mgi_symbol, 
+    stringsAsFactors = FALSE
+  )
+  print(paste("BiomaRt 成功! 保留蛋白编码基因:", length(unique(coding_genes$ensembl_gene_id))))
+  
+}, error = function(e) {
+  stop(paste("BiomaRt 连接失败:", e$message))
+})
+
+# 过滤并合并
+gene_counts <- gene_counts[rownames(gene_counts) %in% gene_map$ENSEMBL, ]
+gene_counts$ENSEMBL <- rownames(gene_counts)
+merged_data <- merge(gene_counts, gene_map, by = "ENSEMBL")
+merged_data <- merged_data[!duplicated(merged_data$ENTREZID), ]
+rownames(merged_data) <- merged_data$ENTREZID
+
+# 提取表达矩阵
+# [关键修改] 只有 4 列数据 (2 Scramble + 2 Phf20)
+# 列索引 2:5 (因为第1列是 merged 后的 ENSEMBL 列, 后面接着是原始数据的4列)
+# 注意：merge 后列的顺序可能会变，最稳妥的方法是用 grep 或索引，这里假设 merge 把 ENSEMBL 放在第一列，后面跟着 counts
+count_cols <- 2:5
+expr_matrix <- as.matrix(merged_data[, count_cols]) 
+colnames(expr_matrix) <- colnames(counts_df)[1:4] # 恢复原始样本名
+
+print("最终表达矩阵样本名:")
+print(colnames(expr_matrix))
+
+# ==============================================================================
+# 3. 差异分析 (2 vs 2)
+# ==============================================================================
+# [关键修改] 定义样本信息
+# 你的数据前两列是 Scramble (L1MKI...421, 422)，后两列是 Phf20 (L1MKI...423, 424)
+sample_info <- data.frame(
+  row.names = colnames(expr_matrix),
+  condition = factor(c("Scramble", "Scramble", "KO", "KO"), 
+                     levels = c("Scramble", "KO")) # Scramble 作为参考水平 (Control)
+)
+
+print("样本分组预览：")
+print(sample_info)
+
+dds <- DESeqDataSetFromMatrix(countData = expr_matrix, colData = sample_info, design = ~ condition)
+dds <- DESeq(dds)
+
+# 明确对比：KO vs Scramble
+# Log2FC > 0 表示在 KO 中上调
+res <- results(dds, contrast = c("condition", "KO", "Scramble"))
+# --- [新增功能] 导出差异分析结果 ---
+print("--- 正在导出 DESeq2 差异分析结果 ---")
+
+# 1. 转换为数据框并添加 ID 列
+res_df <- as.data.frame(res)
+res_df$ENTREZID <- rownames(res_df)
+
+# 2. 合并基因 Symbol (使用之前构建的 gene_map)
+# 注意：merge 后顺序会乱，所以最好只用来添加列
+res_df <- merge(res_df, gene_map[, c("ENTREZID", "SYMBOL", "ENSEMBL")], by = "ENTREZID", all.x = TRUE)
+
+# 3. 整理列顺序 (把 Symbol 放前面方便查看)
+res_df <- res_df[, c("ENTREZID", "SYMBOL", "ENSEMBL", "baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj")]
+
+# 4. 按显著性排序 (p.adjust 从小到大)
+res_df <- res_df[order(res_df$padj), ]
+res_df <- res_df[!is.na(res_df$padj),]
+# 5. 导出文件 1: 所有结果
+write.csv(res_df, "Phf20_DESeq2_All_Results.csv", row.names = FALSE)
+
+# 6. 导出文件 2: 显著差异基因 (padj < 0.05 且 |log2FC| > 1)
+sig_genes <- subset(res_df, padj < 0.05 & abs(log2FoldChange) > 1)
+write.csv(sig_genes, "Phf20_DESeq2_Significant_DEGs.csv", row.names = FALSE)
+
+print(paste("已保存差异分析全表，共", nrow(res_df), "个基因。"))
+print(paste("已保存显著差异基因表 (padj<0.05 & |FC|>2)，共", nrow(sig_genes), "个基因。"))
+gene_list <- res$stat
+names(gene_list) <- rownames(res)
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# ==============================================================================
+# 4. 关注的通路定义 (KEGG ID 转换为 Mouse mmu)
+# ==============================================================================
+target_kegg_ids <- c("mmu04622", "mmu04620", "mmu04623", "mmu04621", "mmu04612")
+target_go_ids   <- c("GO:0051607", "GO:0060337")
+
+kegg_id_map <- c(
+  "mmu04622" = "KEGG_RIG_I_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "mmu04620" = "KEGG_TOLL_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "mmu04623" = "KEGG_CYTOSOLIC_DNA_SENSING_PATHWAY",
+  "mmu04621" = "KEGG_NOD_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "mmu04612" = "KEGG_ANTIGEN_PROCESSING_AND_PRESENTATION"
+)
+
+go_id_map <- c(
+  "GO:0051607" = "GOBP_DEFENSE_RESPONSE_TO_VIRUS",
+  "GO:0060337" = "GOBP_TYPE_I_INTERFERON_SIGNALING_PATHWAY"
+)
+
+target_ids_all <- c(as.character(kegg_id_map), target_go_ids)
+
+pathway_names <- c(
+  "KEGG_RIG_I_LIKE_RECEPTOR_SIGNALING_PATHWAY" = "RIG-I-like receptor signaling",
+  "KEGG_TOLL_LIKE_RECEPTOR_SIGNALING_PATHWAY"  = "Toll-like receptor signaling",
+  "KEGG_CYTOSOLIC_DNA_SENSING_PATHWAY"         = "Cytosolic DNA-sensing",
+  "KEGG_NOD_LIKE_RECEPTOR_SIGNALING_PATHWAY"    = "NOD-like receptor signaling",
+  "KEGG_ANTIGEN_PROCESSING_AND_PRESENTATION"    = "Antigen processing & presentation",
+  "GO:0051607" = "Defense response to virus",
+  "GO:0060337" = "Type I interferon signaling",
+  "GOBP_DEFENSE_RESPONSE_TO_VIRUS"               = "Defense response to virus",
+  "GOBP_TYPE_I_INTERFERON_SIGNALING_PATHWAY"    = "Type I interferon signaling"
+)
+
+# ==============================================================================
+# 5. GSEA 分析 (Mouse)
+# ==============================================================================
+print("--- 开始 GSEA 分析 ---")
+m_df_c2 <- msigdbr(species = "Mus musculus", category = "C2")
+m_df_kegg <- m_df_c2 %>% dplyr::filter(grepl("^KEGG_", gs_name))
+kegg_t2g <- m_df_kegg %>% dplyr::select(gs_name, entrez_gene)
+
+# 设置 seed 保证重复性
+set.seed(123)
+kk_gsea <- GSEA(gene_list, TERM2GENE = kegg_t2g, pvalueCutoff = 1, verbose = FALSE, seed = TRUE)
+
+# GO GSEA
+go_gsea <- gseGO(geneList = gene_list, OrgDb = org.Mm.eg.db, ont = "BP", 
+                 pvalueCutoff = 1, minGSSize = 5, verbose = FALSE, seed = TRUE)
+
+res_df_kegg <- as.data.frame(kk_gsea)
+res_df_go   <- as.data.frame(go_gsea)
+all_gsea_res <- rbind(res_df_kegg, res_df_go)
+
+print("正在导出 GSEA 原始结果...")
+write.csv(all_gsea_res, "Phf20_GSEA_Results_Unfiltered.csv", row.names = FALSE)
+
+# 筛选目标通路绘图
+target_names_gsea <- c(as.character(kegg_id_map), target_go_ids)
+plot_data <- all_gsea_res[all_gsea_res$ID %in% target_names_gsea, ]
+
+if(nrow(plot_data) > 0) {
+  plot_data$Description_Label <- pathway_names[plot_data$ID]
+  # 防止匹配不到名字出现NA
+  plot_data$Description_Label <- ifelse(is.na(plot_data$Description_Label), plot_data$ID, plot_data$Description_Label)
+  plot_data <- plot_data[order(plot_data$NES), ]
+  plot_data$Description_Label <- factor(plot_data$Description_Label, levels = plot_data$Description_Label)
+  
+  p_dot <- ggplot(plot_data, aes(x = NES, y = Description_Label)) +
+    geom_segment(aes(x = 0, xend = NES, y = Description_Label, yend = Description_Label), color = "grey70", size = 0.8) +
+    geom_point(aes(color = p.adjust, size = setSize)) + 
+    scale_color_gradient(low = "red", high = "blue") + 
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    theme_bw() +
+    labs(title = "Target Pathways Enrichment (Phf20 KO vs Scramble)", x = "NES", y = NULL)
+  
+  ggsave("Phf20_GSEA_Dotplot_Final.pdf", p_dot, width = 8, height = max(4, 0.5 * nrow(plot_data) + 2))
+  print("GSEA 气泡图已保存。")
+} else {
+  print("警告: 在 GSEA 结果中未找到任何目标通路，跳过绘图。")
+}
+
+# ==============================================================================
+# 6. GSVA 分析 (Mouse)
+# ==============================================================================
+print("--- 开始 GSVA 分析 ---")
+vst_data <- vst(dds, blind = FALSE)
+expr_normalized <- assay(vst_data)
+
+custom_gene_sets <- list()
+
+target_kegg_names <- as.character(kegg_id_map)
+for (kname in target_kegg_names) {
+  genes <- m_df_kegg %>% filter(gs_name == kname) %>% pull(entrez_gene) %>% unique()
+  if(length(genes) > 0) custom_gene_sets[[kname]] <- genes
+}
+
+# C5 (GO) also for Mouse
+m_df_c5 <- msigdbr(species = "Mus musculus", category = "C5")
+for (gid in target_go_ids) {
+  genes <- NULL
+  key_used <- gid
+  
+  genes <- m_df_c5 %>% filter(gs_exact_source == gid) %>% pull(entrez_gene) %>% unique()
+  if(length(genes) == 0) {
+    target_name <- go_id_map[gid]
+    if(!is.na(target_name)) {
+      genes <- m_df_c5 %>% filter(gs_name == target_name) %>% pull(entrez_gene) %>% unique()
+      if(length(genes) > 0) key_used <- target_name
+    }
+  }
+  if(length(genes) == 0) {
+    try({
+      genes_org <- select(org.Mm.eg.db, keys = gid, keytype = "GOALL", columns = "ENTREZID")$ENTREZID
+      genes <- unique(genes_org[!is.na(genes_org)])
+      if(length(genes) > 0) key_used <- gid
+    }, silent = TRUE)
+  }
+  if(length(genes) > 0) custom_gene_sets[[key_used]] <- genes
+}
+
+if(length(custom_gene_sets) > 0) {
+  
+  if (packageVersion("GSVA") >= "1.52.0") {
+    gsva_par <- gsvaParam(exprData = expr_normalized, geneSets = custom_gene_sets, kcdf = "Gaussian", minSize = 1)
+    gsva_res <- gsva(gsva_par, BPPARAM = SerialParam())
+  } else {
+    gsva_res <- gsva(expr_normalized, custom_gene_sets, kcdf = "Gaussian", min.sz = 1, parallel.sz = 1)
+  }
+  
+  if(is.list(gsva_res) && !is.matrix(gsva_res) && "es" %in% names(gsva_res)) gsva_res <- gsva_res$es
+  
+  rn <- rownames(gsva_res)
+  new_rn <- pathway_names[rn]
+  rownames(gsva_res) <- ifelse(is.na(new_rn), rn, new_rn)
+  
+  print("正在导出 GSVA 评分矩阵...")
+  write.csv(as.data.frame(gsva_res), "Phf20_GSVA_Scores.csv", row.names = TRUE)
+  
+  save_height <- max(4, nrow(gsva_res) * 0.5 + 2)
+  save_width  <- max(5, ncol(gsva_res) * 0.8 + 4)
+  
+  while(!is.null(dev.list())) dev.off()
+  
+  tryCatch({
+    # === 绘图设置 ===
+    # 修改颜色映射：Scramble=蓝, KO=红
+    ann_colors <- list(
+      condition = c(Scramble = "blue", KO = "red")
+    )
+    
+    # [修改] 样本标签适配：前2个是Scramble，后2个是KO
+    new_labels <- c("Scramble_1", "Scramble_2", "Phf20_KO_1", "Phf20_KO_2")
+    
+    colorPalette <- colorRampPalette(c("blue", "white", "red"))(100)
+    
+    pheatmap(gsva_res, 
+             cluster_cols = FALSE, cluster_rows = TRUE,
+             main = "GSVA Scores (Phf20 KO vs Scramble)",
+             annotation_col = sample_info[, "condition", drop=FALSE],
+             annotation_colors = ann_colors,
+             labels_col = new_labels, 
+             cellheight = 20, cellwidth = 30, fontsize = 12,
+             border_color = "white",
+             scale = "row", 
+             breaks = seq(-2, 2, length.out = 101),
+             color = colorPalette,
+             filename = "Phf20_GSVA_Heatmap_Final.pdf",
+             width = save_width, height = save_height)
+    print("GSVA 热图已保存。")
+  }, error = function(e) { print(paste("绘图失败:", e$message)) })
+  
+} else {
+  print("未构建出有效的基因集，GSVA 跳过。")
+}
