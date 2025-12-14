@@ -290,3 +290,109 @@ for (tissue_name in names(sc_by_tissue)) {
 }
 
 print("🎉 全部任务完成！")
+# ==============================================================================
+# 7. 差异表达分析 (DE Analysis) - 文件夹分层版
+# ==============================================================================
+print("🚀 步骤6/6: 开始差异分析 (按文件夹分层存储)...")
+
+library(openxlsx)
+library(dplyr)
+library(Seurat)
+
+# 1. 定义总输出目录
+de_root_dir <- file.path(data_dir, "DE_Results")
+if(!dir.exists(de_root_dir)) dir.create(de_root_dir)
+
+# 2. 循环处理每个组织
+for (tissue_name in names(sc_by_tissue)) {
+  
+  print(paste(">>> 正在分析组织:", tissue_name))
+  obj <- sc_by_tissue[[tissue_name]]
+  DefaultAssay(obj) <- "RNA" # 确保使用 RNA assay
+  
+  # --- 创建当前组织的两个对比文件夹 ---
+  # 路径: DE_Results/Aorta/Cold_vs_RT_25C
+  dir_comp1 <- file.path(de_root_dir, tissue_name, "Cold_vs_RT_25C")
+  # 路径: DE_Results/Aorta/Cold_vs_TN_30C
+  dir_comp2 <- file.path(de_root_dir, tissue_name, "Cold_vs_TN_30C")
+  
+  if(!dir.exists(dir_comp1)) dir.create(dir_comp1, recursive = TRUE)
+  if(!dir.exists(dir_comp2)) dir.create(dir_comp2, recursive = TRUE)
+  
+  cell_types <- unique(obj$cell_type)
+  
+  # 3. 循环处理每个细胞类型
+  for (ctype in cell_types) {
+    # 格式化文件名安全字符
+    safe_ctype_name <- gsub("[[:punct:]]", "_", ctype)
+    # 文件名前缀: 组织_细胞类型
+    file_prefix <- paste0(tissue_name, "_", safe_ctype_name)
+    
+    print(paste("   --- 正在计算:", ctype, "---"))
+    
+    tryCatch({
+      sub_obj <- subset(obj, subset = cell_type == ctype)
+      Idents(sub_obj) <- "Group"
+      
+      # 统计细胞数
+      n_cold <- sum(sub_obj$Group == "Cold_4C")
+      n_rt   <- sum(sub_obj$Group == "RT_25C")
+      n_tn   <- sum(sub_obj$Group == "TN_30C")
+      
+      # ==========================================================
+      # 对比组 1: Cold_4C vs RT_25C (保存到 dir_comp1)
+      # ==========================================================
+      if (n_cold >= 3 && n_rt >= 3) {
+        markers_rt <- FindMarkers(sub_obj, ident.1 = "Cold_4C", ident.2 = "RT_25C", 
+                                  logfc.threshold = 0.25, min.pct = 0.1, only.pos = FALSE)
+        
+        if (nrow(markers_rt) > 0) {
+          # 整理表格
+          markers_rt$gene <- rownames(markers_rt)
+          markers_rt$comparison <- "Cold_vs_RT"
+          markers_rt$cell_type <- ctype
+          markers_rt <- markers_rt %>% select(gene, everything())
+          
+          # 保存文件
+          fname <- paste0(file_prefix, ".xlsx")
+          write.xlsx(markers_rt, file = file.path(dir_comp1, fname))
+          print(paste("      ✅ [VS RT] 保存:", fname))
+        } else {
+          print("      ⚠️ [VS RT] 无差异基因")
+        }
+      } else {
+        print(paste0("      ⏭️ [VS RT] 跳过 (细胞不足: ", n_cold, " vs ", n_rt, ")"))
+      }
+      
+      # ==========================================================
+      # 对比组 2: Cold_4C vs TN_30C (保存到 dir_comp2)
+      # ==========================================================
+      if (n_cold >= 3 && n_tn >= 3) {
+        markers_tn <- FindMarkers(sub_obj, ident.1 = "Cold_4C", ident.2 = "TN_30C", 
+                                  logfc.threshold = 0.25, min.pct = 0.1, only.pos = FALSE)
+        
+        if (nrow(markers_tn) > 0) {
+          # 整理表格
+          markers_tn$gene <- rownames(markers_tn)
+          markers_tn$comparison <- "Cold_vs_TN"
+          markers_tn$cell_type <- ctype
+          markers_tn <- markers_tn %>% select(gene, everything())
+          
+          # 保存文件
+          fname <- paste0(file_prefix, ".xlsx")
+          write.xlsx(markers_tn, file = file.path(dir_comp2, fname))
+          print(paste("      ✅ [VS TN] 保存:", fname))
+        } else {
+          print("      ⚠️ [VS TN] 无差异基因")
+        }
+      } else {
+        print(paste0("      ⏭️ [VS TN] 跳过 (细胞不足: ", n_cold, " vs ", n_tn, ")"))
+      }
+      
+    }, error = function(e) {
+      print(paste("   ❌ 出错:", ctype, e$message))
+    })
+  }
+}
+
+print("🎉 分析完成！请查看 DE_Results 文件夹内的分类结果。")
