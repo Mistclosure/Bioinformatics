@@ -167,11 +167,10 @@ sc_by_tissue <- lapply(names(sc_by_tissue), function(x) {
 
 names(sc_by_tissue) <- c("Aorta", "PBMC", "BoneMarrow") 
 sc_by_tissue <- sc_by_tissue[!sapply(sc_by_tissue, is.null)]
-
-# ------------------------------------------------------------------------------
-# 5. ScType 自动细胞注释
-# ------------------------------------------------------------------------------
-print("🚀 步骤4/6: 运行 ScType 细胞注释...")
+# ==============================================================================
+# 5. ScType 自动细胞注释 (修正版：组织特异性 + PBMC 强制移除 Macrophage)
+# ==============================================================================
+print("🚀 步骤4/6: 运行 ScType 细胞注释 (已应用组织特异性策略)...")
 
 db_file_path <- file.path(data_dir, "ScTypeDB_full.xlsx") 
 
@@ -179,9 +178,7 @@ if (!file.exists(db_file_path)) {
   stop(paste("❌ 未找到数据库文件！请确保 ScTypeDB_full.xlsx 在路径:", data_dir))
 }
 
-gs_list_immune <- gene_sets_prepare(db_file_path, "Immune system") 
-
-# 注释函数
+# 定义注释执行函数 (保持不变)
 run_annotation <- function(obj, gs_list, custom_name = NULL) {
   
   if (!is.null(custom_name)) { obj_name_str <- custom_name } else { obj_name_str <- deparse(substitute(obj)) }
@@ -193,7 +190,7 @@ run_annotation <- function(obj, gs_list, custom_name = NULL) {
   # 映射到 Cluster
   cL_resutls <- do.call("rbind", lapply(unique(obj@meta.data$seurat_clusters), function(cl){
     cells_in_cluster <- rownames(obj@meta.data[obj@meta.data$seurat_clusters == cl, ])
-    es.max_subset <- es.max[ , cells_in_cluster, drop = FALSE] # 关键修复
+    es.max_subset <- es.max[ , cells_in_cluster, drop = FALSE] 
     es.max.cl = sort(rowSums(es.max_subset), decreasing = TRUE)
     head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(obj@meta.data$seurat_clusters==cl)), 10)
   }))
@@ -208,11 +205,55 @@ run_annotation <- function(obj, gs_list, custom_name = NULL) {
   return(obj)
 }
 
-# 批量运行注释
+# --- 关键修改：针对不同组织准备不同的 Gene Sets ---
 sc_by_tissue_annotated <- lapply(names(sc_by_tissue), function(nm) {
+  
   current_obj <- sc_by_tissue[[nm]]
-  new_obj <- run_annotation(current_obj, gs_list_immune, custom_name = nm)
-  return(new_obj)
+  print(paste(">>> 正在为", nm, "准备 ScType 注释..."))
+  
+  # 1. 确定组织数据库策略
+  if (nm == "Aorta") {
+    target_tissues <- c("Immune system", "Heart", "Muscle")
+    print("   -> 策略: Aorta (Immune + Heart + Muscle)")
+    
+  } else if (nm == "BoneMarrow") {
+    target_tissues <- c("Immune system", "Bone marrow")
+    print("   -> 策略: BoneMarrow (Immune + Bone marrow)")
+    
+  } else {
+    # PBMC 处理
+    target_tissues <- c("Immune system")
+    print("   -> 策略: PBMC (仅 Immune system)")
+  }
+  
+  # 2. 动态生成 gs_list 并进行特殊过滤
+  tryCatch({
+    # 加载原始基因集
+    gs_list_dynamic <- gene_sets_prepare(db_file_path, target_tissues)
+    
+    # --- 【新增】针对 PBMC 的特殊过滤 ---
+    if (nm == "PBMC") {
+      # 查找所有名字里包含 "Macrophage" 的细胞类型 (不区分大小写)
+      types_to_remove <- grep("Macrophage", names(gs_list_dynamic$gs_positive), ignore.case = TRUE, value = TRUE)
+      
+      if (length(types_to_remove) > 0) {
+        print(paste("   -> 🛑 [PBMC特异性修正] 正在移除巨噬细胞选项:", paste(types_to_remove, collapse = ", ")))
+        
+        # 从正向和负向列表中移除这些细胞
+        gs_list_dynamic$gs_positive <- gs_list_dynamic$gs_positive[ !names(gs_list_dynamic$gs_positive) %in% types_to_remove ]
+        gs_list_dynamic$gs_negative <- gs_list_dynamic$gs_negative[ !names(gs_list_dynamic$gs_negative) %in% types_to_remove ]
+      }
+    }
+    # ------------------------------------
+    
+    # 执行注释
+    new_obj <- run_annotation(current_obj, gs_list_dynamic, custom_name = nm)
+    return(new_obj)
+    
+  }, error = function(e) {
+    message(paste("   ❌ 准备数据库或注释时出错:", e$message))
+    return(current_obj) 
+  })
 })
 
 names(sc_by_tissue_annotated) <- names(sc_by_tissue)
