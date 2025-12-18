@@ -275,3 +275,124 @@ ggsave(file.path(plot_dir, "04_UMAP_Split_Raw.png"), plot = p_split,
        width = 20, height = 8, dpi = 300, bg = "white") # 对比图更宽一些
 
 print("✅ 图片生成完毕！请查看 Results_Plots_Raw 文件夹。")
+# ==============================================================================
+# 8. 结果可视化与输出 (scCustomize 修正版：修复参数报错)
+# ==============================================================================
+
+# --- 0. 加载必要的包 ---
+if (!require("scCustomize", quietly = TRUE)) {
+  if (!require("devtools", quietly = TRUE)) install.packages("devtools")
+  devtools::install_github("samuel-marsh/scCustomize")
+}
+library(scCustomize)
+library(ggplot2)
+library(scales)
+
+print("🚀 步骤6/6: 正在使用 scCustomize 生成发表级美图...")
+
+# ------------------------------------------------------------------------------
+# A. 设置绘图分组与构建稳健的颜色映射
+# ------------------------------------------------------------------------------
+plot_group <- "cell_type" 
+
+# 1. 获取所有唯一的细胞类型
+unique_types <- sort(unique(as.character(obj@meta.data[[plot_group]])))
+n_types <- length(unique_types)
+
+print(paste("检测到细胞类型数量:", n_types))
+
+# 2. 定义柔和的发表级色盘
+my_palette <- c(
+  "#5050FF", "#CE3D32", "#749B58", "#F0E685", "#466983", "#BA6338", "#5DB1DD", "#802268",
+  "#6BD76B", "#D595A7", "#924822", "#837B8D", "#C75127", "#D58F5C", "#7A65A5", "#E4AF69",
+  "#3B1B53", "#CDDEB7", "#612A79", "#AE1F63", "#E7C453", "#5A655E", "#CC9900", "#99CC00",
+  "#33CC00", "#00CC33", "#00CC99", "#0099CC", "#0033CC", "#3300CC", "#9900CC", "#CC0099",
+  "#CC0033", "#FF3300", "#FF9900", "#FFFF00", "#99FF00", "#33FF00", "#00FF33", "#00FF99",
+  "#0099FF", "#0033FF", "#3300FF", "#9900FF", "#CC00FF", "#FF00CC", "#FF0033", "#FF3333"
+)
+
+# 3. 截取并绑定名字
+if(n_types > length(my_palette)){
+  final_colors <- scales::hue_pal()(n_types)
+} else {
+  final_colors <- my_palette[1:n_types]
+}
+names(final_colors) <- unique_types 
+
+# ------------------------------------------------------------------------------
+# B. 定义增强版箭头主题 (图例位置在这里控制)
+# ------------------------------------------------------------------------------
+arrow_theme <- theme(
+  axis.line = element_line(arrow = arrow(length = unit(0.25, "cm"), type = "closed"), size = 1), 
+  axis.title = element_text(size = 14, face = "bold", hjust = 0.05), 
+  plot.title = element_text(hjust = 0.5, size = 18, face = "bold"), 
+  legend.text = element_text(size = 12),
+  legend.position = "right" # 【关键】图例位置必须写在 theme 里
+)
+
+# ------------------------------------------------------------------------------
+# C. 绘图与保存
+# ------------------------------------------------------------------------------
+plot_dir <- file.path(data_dir, "Results_Plots_scCustomize") 
+if (!dir.exists(plot_dir)) dir.create(plot_dir)
+
+print(paste("正在保存图片至:", plot_dir))
+
+# --- 1. Total 图 ---
+print("正在绘制: Total Integrated...")
+p_total <- DimPlot_scCustom(
+  seurat_object = obj, 
+  group.by = plot_group, 
+  colors_use = final_colors,  
+  figure_plot = TRUE,         
+  label = FALSE,              
+  pt.size = 0.8               
+  # 【修复】这里删除了 legend.position 参数
+) + arrow_theme + ggtitle(paste0("Total (Cells: ", ncol(obj), ")"))
+
+ggsave(file.path(plot_dir, "01_UMAP_Total_scCustom.png"), p_total, width = 14, height = 12, dpi = 300)
+
+# --- 2. WT 独立图 ---
+print("正在绘制: WT Group...")
+obj_wt <- subset(obj, subset = Group == "WT")
+p_wt <- DimPlot_scCustom(
+  seurat_object = obj_wt, 
+  group.by = plot_group, 
+  colors_use = final_colors,  
+  figure_plot = TRUE,
+  label = FALSE,
+  pt.size = 0.8
+) + arrow_theme + ggtitle("WT Group")
+
+ggsave(file.path(plot_dir, "02_UMAP_WT_scCustom.png"), p_wt, width = 14, height = 12, dpi = 300)
+
+# --- 3. KO 独立图 ---
+print("正在绘制: KO Group...")
+obj_ko <- subset(obj, subset = Group == "KO")
+p_ko <- DimPlot_scCustom(
+  seurat_object = obj_ko, 
+  group.by = plot_group, 
+  colors_use = final_colors,
+  figure_plot = TRUE,
+  label = FALSE,
+  pt.size = 0.8
+) + arrow_theme + ggtitle("KO Group")
+
+ggsave(file.path(plot_dir, "03_UMAP_KO_scCustom.png"), p_ko, width = 14, height = 12, dpi = 300)
+
+# --- 4. 对比图 (Split View) ---
+print("正在绘制: Split Comparison...")
+p_split <- DimPlot_scCustom(
+  seurat_object = obj, 
+  group.by = plot_group, 
+  split.by = "Group",         
+  colors_use = final_colors,
+  figure_plot = TRUE,
+  label = FALSE,
+  pt.size = 0.8,
+  num_columns = 2            
+) + arrow_theme + ggtitle("Condition Comparison: WT vs KO")
+
+ggsave(file.path(plot_dir, "04_UMAP_Split_scCustom.png"), p_split, width = 16, height = 8, dpi = 300)
+
+print("✅ 修复完成！图片已成功生成。")
