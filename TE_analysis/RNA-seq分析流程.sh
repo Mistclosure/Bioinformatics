@@ -16,7 +16,7 @@ done
 # 1. 路径配置
 # ======================
 # 工作主目录
-WORKDIR="/home/qiuzerui/Phf8"
+WORKDIR="/home/qiuzerui/Phf20_GSE82115"
 cd ${WORKDIR} || { echo "错误: 无法进入目录 ${WORKDIR}"; exit 1; }
 
 # 输入目录
@@ -28,12 +28,12 @@ TRIM_DIR="${WORKDIR}/trimmed_fastq"
 CLEAN_DIR="${WORKDIR}/clean_non_rRNA"
 ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
-
+ANNO_DIR="/home/qiuzerui/annotationHv38"
 # 外部资源路径
-STAR_INDEX="/home/qiuzerui/star_index_m39"
-GTF_GENE="/home/qiuzerui/annotationMv38/gencode.vM38.annotation_PRI.gtf"
-GTF_TE="/home/qiuzerui/annotationMv38/m39_TE.gtf"
-RRNA_INDEX="/home/qiuzerui/annotationMv38/rRNA_mtDNA_index"
+STAR_INDEX="/home/qiuzerui/star_index_h38"
+GTF_GENE="${ANNO_DIR}/gencode.v49.annotation_PRI.gtf"
+GTF_TE="${ANNO_DIR}/h38_TE.gtf"
+RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
 
 # 创建所有必要的输出目录
 mkdir -p ${RAW_DIR} ${TRIM_DIR} ${CLEAN_DIR} ${ALIGN_DIR} ${COUNTS_DIR}
