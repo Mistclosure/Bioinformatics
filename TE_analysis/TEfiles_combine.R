@@ -1,8 +1,14 @@
 # 1. 获取工作路径
-setwd('//wsl.localhost/Ubuntu/home/qiuzerui/KAT8/')
+#请修改变量名称
+wd <- '//wsl.localhost/Ubuntu/home/qiuzerui/BRPF1/'
+filesname <- '_counts.csv'
+#############
+setwd(wd)
 library(data.table)
-files <- list.files('//wsl.localhost/Ubuntu/home/qiuzerui/KAT8/counts/'
-                    , pattern="\\.cntTable$", recursive=TRUE, full.names=TRUE)
+
+# 获取所有 .cntTable 文件
+files <- list.files(paste0(wd,'counts'), 
+                    pattern="\\.cntTable$", recursive=TRUE, full.names=TRUE)
 
 # 2. 读取并整合
 te_list <- lapply(files, function(f){
@@ -17,5 +23,5 @@ te_merged <- Reduce(function(x, y) merge(x, y, by="RepeatID", all=TRUE), te_list
 te_merged[is.na(te_merged)] <- 0  # 将NA填0
 
 # 4. 输出文件
-write.csv(te_merged, "KAT8_counts.csv", quote=FALSE,row.names = F)
+write.csv(te_merged, filesname, quote=FALSE,row.names = F)
 cat("✅ 已生成 counts/ERV_counts.TE_count.txt\n")
