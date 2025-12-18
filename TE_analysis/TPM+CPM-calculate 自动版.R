@@ -10,22 +10,23 @@ library(GenomicRanges)
 # ==============================
 # 1. 参数与路径设置
 # ==============================
-counts_file <- "Y90C_counts.csv"
+counts_file <- "Phf20_GSE_counts.csv"
 
 # 注释文件路径
 gene_gtf_path <- "\\\\wsl.localhost\\Ubuntu\\home\\qiuzerui\\annotationMv38\\gencode.vM38.annotation_PRI.gtf"
 te_gtf_path   <- "\\\\wsl.localhost\\Ubuntu\\home\\qiuzerui\\annotationMv38\\m39_TE.gtf"
 
 # 定义两个输出文件名
-output_cpm_file <- "Y90C_CPM.csv"  # 输出1: 包含 Counts 和 CPM
-output_tpm_file <- "Y90C_TPM.csv"  # 输出2: 包含 Length 和 TPM
+output_cpm_file <- "Phf20_GSE82115_CPM.csv"  # 输出1: 包含 Counts 和 CPM
+output_tpm_file <- "Phf20_GSE82115_TPM.csv"  # 输出2: 包含 Length 和 TPM
+samplename <- c('shNT_rep1','shNT_rep2','shNT_rep3','shPHF20_rep1','shPHF20_rep2','shPHF20_rep3')
 
 # ==============================
 # 2. 读取数据与准备注释 (Symbol转换)
 # ==============================
 message(paste0("[", Sys.time(), "] 正在读取 Counts 文件..."))
 counts_df <- fread(counts_file)
-
+colnames(counts_df)[2:ncol(counts_df)] <- samplename
 # --- 2.1 加载 GTF 提取 Gene Symbol (为了让 CPM 文件也有 Symbol) ---
 message(paste0("[", Sys.time(), "] 正在加载 GTF 以匹配 Gene Symbol..."))
 gene_gtf <- import(gene_gtf_path)
@@ -145,7 +146,7 @@ for (sample in tpm_calc_cols) {
   cols_order_tpm <- c(cols_order_tpm, sample)
 }
 df_tpm <- df_tpm %>% select(any_of(cols_order_tpm))
---- 输出文件 2: TPM ---
+#--- 输出文件 2: TPM ---
 message(paste(">>> 正在导出 TPM 文件:", output_tpm_file))
 
 # (可选)这里我们只保留 ID, Length 和 TPM 列 (去除 Raw Counts 以保持文件纯净，按需调整)
@@ -160,4 +161,5 @@ message("========================================================")
 message("🎉 全部完成！已生成两个独立文件：")
 message(paste("1.", output_cpm_file))
 message(paste("2.", output_tpm_file))
+message("========================================================")
 message("========================================================")
