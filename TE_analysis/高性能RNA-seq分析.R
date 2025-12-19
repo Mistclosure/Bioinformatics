@@ -1,27 +1,22 @@
 #!/bin/bash
 
 # ==========================================
-# TE Analysis Pipeline (高性能怪兽版)
+# TE Analysis Pipeline (全自动高性能版)
 # ==========================================
 # 适配配置: 180 Threads / 236GB RAM
-# 优化策略: 单样本饱和式计算
+# 优化策略: Step0-3 单样本饱和计算 -> Step4 多样本并行计算
 
 # ======================
-# 0. 全局资源配置 (关键修改)
+# 0. 全局资源配置
 # ======================
-# 预留部分资源给系统，避免卡死。
-# STAR 和 Bowtie2 给 128 线程已经接近线性加速的极限。
 HIGH_THREADS=128  
 MID_THREADS=48
-LOW_THREADS=16    # fastp 超过16线程收益极低，甚至变慢
-
-echo ">>> 当前检测到的资源配置 <<<"
-echo "分配线程数: $HIGH_THREADS (用于比对核心)"
+LOW_THREADS=16
 
 # 检查环境
 for cmd in fastq-dump fasterq-dump fastp bowtie2 STAR TEcount samtools; do
     if ! command -v $cmd &> /dev/null; then
-        echo "错误: 命令 $cmd 未找到！请先运行: conda activate te_env"
+        echo "❌ 错误: 命令 $cmd 未找到！请先运行: conda activate te_env"
         exit 1
     fi
 done
@@ -32,7 +27,7 @@ done
 WORKDIR="/home/qiuzerui/RNA-seq/Phf20_GSE82115"
 # 确保目录存在
 if [ ! -d "$WORKDIR" ]; then
-    echo "错误: 工作目录 $WORKDIR 不存在！"
+    echo "❌ 错误: 工作目录 $WORKDIR 不存在！"
     exit 1
 fi
 cd ${WORKDIR} || exit 1
@@ -44,7 +39,7 @@ CLEAN_DIR="${WORKDIR}/clean_non_rRNA"
 ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
 
-# 注意：请确保这些资源路径是正确的，并且你有读取权限
+# 注意：请确保这些资源路径是正确的
 ANNO_DIR="/home/qiuzerui/RNA-seq/annotations/annotationHv49"
 STAR_INDEX="/home/qiuzerui/RNA-seq/indexes/star_index_h38"
 GTF_GENE="${ANNO_DIR}/gencode.v49.annotation_PRI.gtf"
@@ -63,27 +58,20 @@ sra_files=(${SRA_DIR}/*.sra)
 shopt -u nullglob
 
 if [ ${#sra_files[@]} -gt 0 ]; then
-    echo ">>> 开始 SRA -> FASTQ 转换 (高性能模式)..."
+    echo ">>> 开始 SRA -> FASTQ 转换..."
     for sra_file in "${sra_files[@]}"; do
         filename=$(basename ${sra_file})
         sample_name=${filename%.sra}
         
-        echo "正在处理: ${sample_name}"
-
+        # 简单检查是否已存在
         if [ -f "${RAW_DIR}/${sample_name}_1.fastq.gz" ] || [ -f "${RAW_DIR}/${sample_name}_1.fq.gz" ]; then
-            echo "   -> 跳过 (已存在)"
             continue
         fi
 
-        # 优化点：使用 fasterq-dump 的内存缓存和多线程
-        # -e: 线程数 (给48个线程，主要受限于磁盘IO)
-        # -m: 内存限制 (给2048MB，这会利用你的大内存来加速)
+        echo "正在处理: ${sample_name}"
         if command -v fasterq-dump &> /dev/null; then
             fasterq-dump --split-3 -e ${MID_THREADS} -m 2048MB --outdir ${RAW_DIR} --progress ${sra_file}
             
-            # 转换完立即压缩 (Pigz 是 gzip 的多线程版，如果没装会自动退回 gzip)
-            # 这里我们利用多线程压缩
-            echo "   -> 正在多线程压缩..."
             if command -v pigz &> /dev/null; then
                 pigz -p ${MID_THREADS} ${RAW_DIR}/${sample_name}_1.fastq
                 pigz -p ${MID_THREADS} ${RAW_DIR}/${sample_name}_2.fastq
@@ -92,16 +80,15 @@ if [ ${#sra_files[@]} -gt 0 ]; then
                 gzip -f ${RAW_DIR}/${sample_name}_2.fastq
             fi
         else
-            echo "   -> 警告：未找到 fasterq-dump，使用慢速 fastq-dump"
             fastq-dump --split-3 --gzip --outdir ${RAW_DIR} ${sra_file}
         fi
     done
 else
-    echo "⏭️  未检测到 SRA 文件，跳过转换步骤。"
+    echo "⏭️  SRA 目录无文件或已处理，跳过。"
 fi
 
 # ==========================================
-# Step 1-3: 预处理和比对循环
+# Step 1-3: 预处理和比对循环 (单样本串行，多线程加速)
 # ==========================================
 echo "=== 开始 Step 1-3: 预处理和比对 ==="
 
@@ -109,106 +96,125 @@ shopt -s nullglob
 fastq_files=(${RAW_DIR}/*_1.fastq.gz ${RAW_DIR}/*_1.fq.gz)
 shopt -u nullglob
 
-if [ ${#fastq_files[@]} -eq 0 ]; then
-    echo "❌ 错误: 未找到输入文件 (*_1.fastq.gz / *.fq.gz)"
+if [ ${#fastq_files[@]} -gt 0 ]; then
+    for r1_file in "${fastq_files[@]}"; do
+        filename=$(basename "${r1_file}")
+        
+        # 智能后缀识别
+        if [[ "$filename" == *"_1.fastq.gz" ]]; then
+            suffix="_1.fastq.gz"
+            r2_suffix="_2.fastq.gz"
+        elif [[ "$filename" == *"_1.fq.gz" ]]; then
+            suffix="_1.fq.gz"
+            r2_suffix="_2.fq.gz"
+        else 
+            continue 
+        fi
+        
+        sample_name=${filename%$suffix}
+        r2_file="${RAW_DIR}/${sample_name}${r2_suffix}"
+
+        # 检查是否全部完成，如果bam已存在则彻底跳过
+        if [ -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
+            # echo "   -> ${sample_name} 比对已完成，跳过。"
+            continue
+        fi
+
+        echo ">>> 处理样本: ${sample_name} <<<"
+
+        # Step 1: Fastp
+        if [ ! -f "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" ]; then
+            echo "[1/3] fastp 质控..."
+            fastp -i "${r1_file}" -I "${r2_file}" \
+                  -o "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" \
+                  -O "${TRIM_DIR}/${sample_name}_2.clean.fq.gz" \
+                  -h "${TRIM_DIR}/${sample_name}_fastp.html" \
+                  -j "${TRIM_DIR}/${sample_name}_fastp.json" \
+                  --thread ${LOW_THREADS} --detect_adapter_for_pe --length_required 25
+        fi
+
+        # Step 2: Bowtie2
+        if [ ! -f "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" ]; then
+            echo "[2/3] Bowtie2 去 rRNA..."
+            bowtie2 -p ${HIGH_THREADS} --very-fast-local --no-unal -x "${RRNA_INDEX}" \
+                    -1 "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" \
+                    -2 "${TRIM_DIR}/${sample_name}_2.clean.fq.gz" \
+                    --un-conc-gz "${CLEAN_DIR}/${sample_name}_clean" \
+                    > /dev/null 2>&1
+            
+            mv "${CLEAN_DIR}/${sample_name}_clean.1" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.1.gz" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz"
+            mv "${CLEAN_DIR}/${sample_name}_clean.2" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.2.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz"
+        fi
+
+        # Step 3: STAR
+        if [ ! -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
+            echo "[3/3] STAR 比对..."
+            STAR --runThreadN ${HIGH_THREADS} --genomeDir "${STAR_INDEX}" \
+                 --readFilesIn "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" \
+                 --readFilesCommand zcat \
+                 --outFileNamePrefix "${ALIGN_DIR}/${sample_name}." \
+                 --outSAMtype BAM SortedByCoordinate \
+                 --winAnchorMultimapNmax 500 --outFilterMultimapNmax 500 \
+                 --outMultimapperOrder Random --quantMode GeneCounts --outSAMattributes All \
+                 --genomeSAsparseD 3 \
+                 --limitBAMsortRAM 60000000000 
+
+            samtools index -@ 32 "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam"
+        fi
+    done
+else
+    echo "⚠️  未检测到原始 FASTQ 文件，假设已进入比对阶段..."
+fi
+
+# ==========================================
+# Step 4: TEcount (全自动并行定量)
+# ==========================================
+echo "=== Step 4: TEcount 自动扫描并行定量 ==="
+
+# 1. 启用 nullglob 防止找不到文件报错
+shopt -s nullglob
+# 自动扫描所有 BAM 文件
+bam_files=(${ALIGN_DIR}/*.Aligned.sortedByCoord.out.bam)
+shopt -u nullglob
+
+count_bams=${#bam_files[@]}
+
+if [ "$count_bams" -eq "0" ]; then
+    echo "❌ 错误: 在 ${ALIGN_DIR} 中未找到任何符合要求的 BAM 文件！"
     exit 1
 fi
 
-for r1_file in "${fastq_files[@]}"; do
-    filename=$(basename "${r1_file}")
+echo "✅ 检测到 $count_bams 个 BAM 文件，准备并行处理..."
+
+# 2. 循环处理每一个检测到的 BAM 文件
+for bam_file in "${bam_files[@]}"; do
     
-    # 智能后缀识别
-    if [[ "$filename" == *"_1.fastq.gz" ]]; then
-        suffix="_1.fastq.gz"
-        r2_suffix="_2.fastq.gz"
-    elif [[ "$filename" == *"_1.fq.gz" ]]; then
-        suffix="_1.fq.gz"
-        r2_suffix="_2.fq.gz"
-    else 
-        continue 
-    fi
-    
-    sample_name=${filename%$suffix}
-    r2_file="${RAW_DIR}/${sample_name}${r2_suffix}"
+    # --- 关键修改：自动提取样本名 ---
+    # basename 命令去掉路径，第二个参数去掉后缀
+    sample_name=$(basename "$bam_file" .Aligned.sortedByCoord.out.bam)
 
-    echo ">>> 处理样本: ${sample_name} <<<"
-
-    # Step 1: Fastp (质控)
-    # 优化点：线程设为 16 (Fastp 超过 16 线程效率提升不明显)
-    if [ ! -f "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" ]; then
-        echo "[1/3] fastp 质控..."
-        fastp -i "${r1_file}" -I "${r2_file}" \
-              -o "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" \
-              -O "${TRIM_DIR}/${sample_name}_2.clean.fq.gz" \
-              -h "${TRIM_DIR}/${sample_name}_fastp.html" \
-              -j "${TRIM_DIR}/${sample_name}_fastp.json" \
-              --thread ${LOW_THREADS} --detect_adapter_for_pe --length_required 25
-    else
-        echo "   -> 跳过 fastp (已完成)"
+    # 检查输出是否存在
+    if [ -f "${COUNTS_DIR}/${sample_name}.cntTable" ]; then
+        echo "✅ [跳过] ${sample_name} 结果已存在。"
+        continue
     fi
 
-    # Step 2: Bowtie2 (去 rRNA)
-    # 优化点：使用 128 线程满载运行
-    if [ ! -f "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" ]; then
-        echo "[2/3] Bowtie2 去 rRNA (线程: $HIGH_THREADS)..."
-        bowtie2 -p ${HIGH_THREADS} --very-fast-local --no-unal -x "${RRNA_INDEX}" \
-                -1 "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" \
-                -2 "${TRIM_DIR}/${sample_name}_2.clean.fq.gz" \
-                --un-conc-gz "${CLEAN_DIR}/${sample_name}_clean" \
-                > /dev/null 2>&1
-        
-        # 重命名输出
-        mv "${CLEAN_DIR}/${sample_name}_clean.1" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.1.gz" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz"
-        mv "${CLEAN_DIR}/${sample_name}_clean.2" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.2.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz"
-    else
-        echo "   -> 跳过 Bowtie2 (已完成)"
-    fi
+    echo "🚀 [后台启动] 正在定量: ${sample_name}"
 
-    # Step 3: STAR (比对)
-    # 优化点：128 线程 + BAM 压缩
-    if [ ! -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
-        echo "[3/3] STAR 比对 (线程: $HIGH_THREADS)..."
-        STAR --runThreadN ${HIGH_THREADS} --genomeDir "${STAR_INDEX}" \
-             --readFilesIn "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" \
-             --readFilesCommand zcat \
-             --outFileNamePrefix "${ALIGN_DIR}/${sample_name}." \
-             --outSAMtype BAM SortedByCoordinate \
-             --winAnchorMultimapNmax 500 --outFilterMultimapNmax 500 \
-             --outMultimapperOrder Random --quantMode GeneCounts --outSAMattributes All \
-             --genomeSAsparseD 3 \
-             --limitBAMsortRAM 60000000000 
-             # 优化点：允许 STAR 使用 60GB 内存进行 BAM 排序 (你的内存足够大)
-
-        # 优化点：Samtools index 也使用多线程 (32线程)
-        samtools index -@ 32 "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam"
-    else
-        echo "   -> 跳过 STAR (已完成)"
-    fi
-done
-
-# ==========================================
-# Step 4: TEcount (定量)
-# ==========================================
-echo "=== 开始 Step 4: TEcount 定量 ==="
-
-# TEcount 本身是 Python 单线程为主，但在处理大 BAM 文件时，I/O 是瓶颈。
-# 由于我们是大内存机器，TEcount 读取 GTF 会非常快。
-
-for bam_file in ${ALIGN_DIR}/*.Aligned.sortedByCoord.out.bam; do
-    [ -e "$bam_file" ] || continue
-    sample_name=$(basename "${bam_file}" .Aligned.sortedByCoord.out.bam)
-    
-    if [ ! -f "${COUNTS_DIR}/${sample_name}.cntTable" ]; then
-        echo "正在定量: ${sample_name}"
+    # --- 核心命令 (后台运行 &) ---
+    (
         TEcount --sortByPos --format BAM --mode multi \
                 --GTF "${GTF_GENE}" \
                 --TE "${GTF_TE}" \
                 --project "${COUNTS_DIR}/${sample_name}" \
                 --stranded reverse \
-                -b "${bam_file}"
-    else
-        echo "-> 跳过 ${sample_name} (已完成)"
-    fi
+                -b "${bam_file}" \
+        && echo "🎉 [完成] ${sample_name}"
+    ) & 
+
 done
 
-echo "🎉 恭喜！高性能分析流程全部完成。"
+# 3. 等待所有任务
+echo "⏳ 所有任务已投递，正在后台全速计算 (请勿关闭终端)..."
+wait
+echo "✅ 所有流程圆满结束！"
