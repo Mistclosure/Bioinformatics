@@ -28,7 +28,7 @@ TRIM_DIR="${WORKDIR}/trimmed_fastq"
 CLEAN_DIR="${WORKDIR}/clean_non_rRNA"
 ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
-ANNO_DIR="/home/qiuzerui/annotationHv38"
+ANNO_DIR="/home/qiuzerui/annotationHv49"
 # 外部资源路径
 STAR_INDEX="/home/qiuzerui/star_index_h38"
 GTF_GENE="${ANNO_DIR}/gencode.v49.annotation_PRI.gtf"
