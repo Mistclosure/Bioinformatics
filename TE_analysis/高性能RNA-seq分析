@@ -45,8 +45,8 @@ ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
 
 # 注意：请确保这些资源路径是正确的，并且你有读取权限
-ANNO_DIR="/home/qiuzerui/annotations/annotationHv49"
-STAR_INDEX="/home/qiuzerui/indexes/star_index_h38"
+ANNO_DIR="/home/qiuzerui/RNA-seq/annotations/annotationHv49"
+STAR_INDEX="/home/qiuzerui/RNA-seq/indexes/star_index_h38"
 GTF_GENE="${ANNO_DIR}/gencode.v49.annotation_PRI.gtf"
 GTF_TE="${ANNO_DIR}/h38_TE.gtf"
 RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
