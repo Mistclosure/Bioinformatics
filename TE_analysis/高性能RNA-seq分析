@@ -29,7 +29,7 @@ done
 # ======================
 # 1. 路径配置
 # ======================
-WORKDIR="/home/qiuzerui/Phf20_GSE82115"
+WORKDIR="/home/qiuzerui/RNA-seq/Phf20_GSE82115"
 # 确保目录存在
 if [ ! -d "$WORKDIR" ]; then
     echo "错误: 工作目录 $WORKDIR 不存在！"
@@ -45,8 +45,8 @@ ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
 
 # 注意：请确保这些资源路径是正确的，并且你有读取权限
-ANNO_DIR="/home/qiuzerui/annotationHv49"
-STAR_INDEX="/home/qiuzerui/star_index_h38"
+ANNO_DIR="/home/qiuzerui/annotations/annotationHv49"
+STAR_INDEX="/home/qiuzerui/indexes/star_index_h38"
 GTF_GENE="${ANNO_DIR}/gencode.v49.annotation_PRI.gtf"
 GTF_TE="${ANNO_DIR}/h38_TE.gtf"
 RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
