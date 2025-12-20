@@ -276,123 +276,276 @@ ggsave(file.path(plot_dir, "04_UMAP_Split_Raw.png"), plot = p_split,
 
 print("✅ 图片生成完毕！请查看 Results_Plots_Raw 文件夹。")
 # ==============================================================================
-# 8. 结果可视化与输出 (scCustomize 修正版：修复参数报错)
+# 8. 细胞比例分析 (带百分比标签)
 # ==============================================================================
+print("🚀 步骤7/8: 正在进行细胞比例统计分析...")
 
-# --- 0. 加载必要的包 ---
-if (!require("scCustomize", quietly = TRUE)) {
-  if (!require("devtools", quietly = TRUE)) install.packages("devtools")
-  devtools::install_github("samuel-marsh/scCustomize")
+# 创建统计结果存放文件夹
+stats_dir <- file.path(data_dir, "Results_Stats")
+if (!dir.exists(stats_dir)) dir.create(stats_dir)
+
+# 8.1 计算比例数据
+# ------------------------------------------------------------------------------
+# 提取元数据
+meta_df <- obj@meta.data
+
+# 使用 dplyr 进行分组统计
+prop_data <- meta_df %>%
+  group_by(Group, cell_type) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  group_by(Group) %>%
+  mutate(
+    Total = sum(Count),
+    Percent = Count / Total,
+    # 准备标签文本：只有比例大于 3% 才显示数值，防止重叠堆积
+    Label = ifelse(Percent > 0.03, paste0(round(Percent * 100, 1), "%"), "") 
+  )
+
+# 8.2 绘制堆叠柱状图
+# ------------------------------------------------------------------------------
+p_barplot <- ggplot(prop_data, aes(x = Group, y = Percent, fill = cell_type)) +
+  geom_bar(stat = "identity", position = "fill", width = 0.7) +
+  # 添加文字标签 (居中显示)
+  geom_text(aes(label = Label), 
+            position = position_fill(vjust = 0.5), 
+            size = 3.5, color = "black") +
+  scale_y_continuous(labels = scales::percent) + # Y轴显示为百分比
+  labs(x = "Group", y = "Cell Proportion (%)", title = "Cell Type Proportion: WT vs KO") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    axis.text.x = element_text(size = 12, face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank()
+  )
+
+# 8.3 保存结果
+# ------------------------------------------------------------------------------
+# 保存图片
+ggsave(file.path(stats_dir, "05_Cell_Proportion_Barplot.png"), 
+       plot = p_barplot, width = 8, height = 6, dpi = 300)
+
+# 保存统计表格 (CSV)
+write.csv(prop_data, file.path(stats_dir, "05_Cell_Proportion_Table.csv"), row.names = FALSE)
+
+print("✅ 细胞比例图已生成！")
+
+# ==============================================================================
+# 9. 差异分析 (KO vs WT, 循环所有细胞类型)
+# ==============================================================================
+print("🚀 步骤8/8: 正在进行差异基因分析 (KO vs WT)...")
+
+# 9.1 准备工作
+# ------------------------------------------------------------------------------
+# 切换默认 Idents 为 cell_type，方便后续 subset
+Idents(obj) <- "cell_type"
+
+# 获取所有存在的细胞类型
+all_cell_types <- unique(obj$cell_type)
+deg_list <- list() # 用于存储所有类型的差异基因结果
+
+# 9.2 循环计算
+# ------------------------------------------------------------------------------
+for (ctype in all_cell_types) {
+  print(paste0("  -> 正在分析细胞类型: ", ctype))
+  
+  # 提取当前细胞类型的子集
+  sub_obj <- subset(obj, idents = ctype)
+  
+  # 切换 Ident 为 Group 以便比较 WT 和 KO
+  Idents(sub_obj) <- "Group"
+  
+  # 检查：必须 WT 和 KO 两个组里都有细胞才能对比
+  # table(sub_obj$Group) 会返回各组细胞数
+  group_counts <- table(sub_obj$Group)
+  
+  if (sum(names(group_counts) %in% c("WT", "KO")) == 2 && 
+      min(group_counts) >= 3) { # 每个组至少有3个细胞才分析
+    
+    tryCatch({
+      # FindMarkers 计算差异
+      # ident.1 = "KO" (实验组), ident.2 = "WT" (基准组)
+      # 结果解读：avg_log2FC > 0 代表在 KO 中上调
+      markers <- FindMarkers(sub_obj, ident.1 = "KO", ident.2 = "WT", 
+                             logfc.threshold = 0.25, # 至少有 0.25 logFC 差异
+                             min.pct = 0.1,          # 至少在 10% 细胞中表达
+                             only.pos = FALSE)       # 上下调都要
+      
+      if (nrow(markers) > 0) {
+        markers$gene <- rownames(markers)
+        markers$cell_type <- ctype
+        markers$comparison <- "KO_vs_WT"
+        
+        # 整理列顺序
+        markers <- markers %>% select(cell_type, gene, avg_log2FC, p_val_adj, p_val, everything())
+        
+        # 存入列表
+        deg_list[[ctype]] <- markers
+      } else {
+        message(paste("     [提示] ", ctype, " 没有找到显著差异基因。"))
+      }
+      
+    }, error = function(e) {
+      message(paste("     [错误] 分析 ", ctype, " 时出错: ", e$message))
+    })
+    
+  } else {
+    message(paste("     [跳过] ", ctype, " 细胞数量不足或缺失某一组 (WT/KO)。"))
+  }
 }
-library(scCustomize)
-library(ggplot2)
-library(scales)
 
-print("🚀 步骤6/6: 正在使用 scCustomize 生成发表级美图...")
-
+# 9.3 导出结果
 # ------------------------------------------------------------------------------
-# A. 设置绘图分组与构建稳健的颜色映射
-# ------------------------------------------------------------------------------
-plot_group <- "cell_type" 
-
-# 1. 获取所有唯一的细胞类型
-unique_types <- sort(unique(as.character(obj@meta.data[[plot_group]])))
-n_types <- length(unique_types)
-
-print(paste("检测到细胞类型数量:", n_types))
-
-# 2. 定义柔和的发表级色盘
-my_palette <- c(
-  "#5050FF", "#CE3D32", "#749B58", "#F0E685", "#466983", "#BA6338", "#5DB1DD", "#802268",
-  "#6BD76B", "#D595A7", "#924822", "#837B8D", "#C75127", "#D58F5C", "#7A65A5", "#E4AF69",
-  "#3B1B53", "#CDDEB7", "#612A79", "#AE1F63", "#E7C453", "#5A655E", "#CC9900", "#99CC00",
-  "#33CC00", "#00CC33", "#00CC99", "#0099CC", "#0033CC", "#3300CC", "#9900CC", "#CC0099",
-  "#CC0033", "#FF3300", "#FF9900", "#FFFF00", "#99FF00", "#33FF00", "#00FF33", "#00FF99",
-  "#0099FF", "#0033FF", "#3300FF", "#9900FF", "#CC00FF", "#FF00CC", "#FF0033", "#FF3333"
-)
-
-# 3. 截取并绑定名字
-if(n_types > length(my_palette)){
-  final_colors <- scales::hue_pal()(n_types)
+if (length(deg_list) > 0) {
+  # 合并为一个大表格
+  all_degs <- do.call(rbind, deg_list)
+  
+  # 1. 保存所有差异基因到一个 CSV
+  write.csv(all_degs, file.path(stats_dir, "06_All_DEGs_KO_vs_WT_Summary.csv"), row.names = FALSE)
+  
+  # 2. 保存到 Excel (每个细胞类型一个 Sheet，方便查看) - 推荐使用
+  wb <- createWorkbook()
+  
+  # 添加一个总表 Sheet
+  addWorksheet(wb, "All_Combined")
+  writeData(wb, "All_Combined", all_degs)
+  
+  # 为每个细胞类型添加单独的 Sheet
+  for (ctype_name in names(deg_list)) {
+    # Excel Sheet 名字不能太长或包含特殊字符，简单处理一下
+    clean_name <- substr(gsub("[^[:alnum:]]", "_", ctype_name), 1, 30)
+    addWorksheet(wb, clean_name)
+    writeData(wb, clean_name, deg_list[[ctype_name]])
+  }
+  
+  saveWorkbook(wb, file.path(stats_dir, "06_DEGs_KO_vs_WT_Full_Report.xlsx"), overwrite = TRUE)
+  
+  print(paste("✅ 差异分析完成！结果已保存至:", stats_dir))
+  print("   - 06_DEGs_KO_vs_WT_Full_Report.xlsx (推荐查看)")
+  
 } else {
-  final_colors <- my_palette[1:n_types]
+  print("⚠️ 未找到任何显著差异基因，请检查数据或分组。")
 }
-names(final_colors) <- unique_types 
 
-# ------------------------------------------------------------------------------
-# B. 定义增强版箭头主题 (图例位置在这里控制)
-# ------------------------------------------------------------------------------
-arrow_theme <- theme(
-  axis.line = element_line(arrow = arrow(length = unit(0.25, "cm"), type = "closed"), size = 1), 
-  axis.title = element_text(size = 14, face = "bold", hjust = 0.05), 
-  plot.title = element_text(hjust = 0.5, size = 18, face = "bold"), 
-  legend.text = element_text(size = 12),
-  legend.position = "right" # 【关键】图例位置必须写在 theme 里
-)
-
-# ------------------------------------------------------------------------------
-# C. 绘图与保存
-# ------------------------------------------------------------------------------
-plot_dir <- file.path(data_dir, "Results_Plots_scCustomize") 
-if (!dir.exists(plot_dir)) dir.create(plot_dir)
-
-print(paste("正在保存图片至:", plot_dir))
-
-# --- 1. Total 图 ---
-print("正在绘制: Total Integrated...")
-p_total <- DimPlot_scCustom(
-  seurat_object = obj, 
-  group.by = plot_group, 
-  colors_use = final_colors,  
-  figure_plot = TRUE,         
-  label = FALSE,              
-  pt.size = 0.8               
-  # 【修复】这里删除了 legend.position 参数
-) + arrow_theme + ggtitle(paste0("Total (Cells: ", ncol(obj), ")"))
-
-ggsave(file.path(plot_dir, "01_UMAP_Total_scCustom.png"), p_total, width = 14, height = 12, dpi = 300)
-
-# --- 2. WT 独立图 ---
-print("正在绘制: WT Group...")
-obj_wt <- subset(obj, subset = Group == "WT")
-p_wt <- DimPlot_scCustom(
-  seurat_object = obj_wt, 
-  group.by = plot_group, 
-  colors_use = final_colors,  
-  figure_plot = TRUE,
-  label = FALSE,
-  pt.size = 0.8
-) + arrow_theme + ggtitle("WT Group")
-
-ggsave(file.path(plot_dir, "02_UMAP_WT_scCustom.png"), p_wt, width = 14, height = 12, dpi = 300)
-
-# --- 3. KO 独立图 ---
-print("正在绘制: KO Group...")
-obj_ko <- subset(obj, subset = Group == "KO")
-p_ko <- DimPlot_scCustom(
-  seurat_object = obj_ko, 
-  group.by = plot_group, 
-  colors_use = final_colors,
-  figure_plot = TRUE,
-  label = FALSE,
-  pt.size = 0.8
-) + arrow_theme + ggtitle("KO Group")
-
-ggsave(file.path(plot_dir, "03_UMAP_KO_scCustom.png"), p_ko, width = 14, height = 12, dpi = 300)
-
-# --- 4. 对比图 (Split View) ---
-print("正在绘制: Split Comparison...")
-p_split <- DimPlot_scCustom(
-  seurat_object = obj, 
-  group.by = plot_group, 
-  split.by = "Group",         
-  colors_use = final_colors,
-  figure_plot = TRUE,
-  label = FALSE,
-  pt.size = 0.8,
-  num_columns = 2            
-) + arrow_theme + ggtitle("Condition Comparison: WT vs KO")
-
-ggsave(file.path(plot_dir, "04_UMAP_Split_scCustom.png"), p_split, width = 16, height = 8, dpi = 300)
-
-print("✅ 修复完成！图片已成功生成。")
+print("🎉 所有分析流程结束！")
+# # ==============================================================================
+# # 7. 结果可视化与输出 (scCustomize 修正版：修复参数报错)
+# # ==============================================================================
+# 
+# # --- 0. 加载必要的包 ---
+# if (!require("scCustomize", quietly = TRUE)) {
+#   if (!require("devtools", quietly = TRUE)) install.packages("devtools")
+#   devtools::install_github("samuel-marsh/scCustomize")
+# }
+# library(scCustomize)
+# library(ggplot2)
+# library(scales)
+# 
+# print("🚀 步骤6/6: 正在使用 scCustomize 生成发表级美图...")
+# 
+# # ------------------------------------------------------------------------------
+# # A. 设置绘图分组与构建稳健的颜色映射
+# # ------------------------------------------------------------------------------
+# plot_group <- "cell_type" 
+# 
+# # 1. 获取所有唯一的细胞类型
+# unique_types <- sort(unique(as.character(obj@meta.data[[plot_group]])))
+# n_types <- length(unique_types)
+# 
+# print(paste("检测到细胞类型数量:", n_types))
+# 
+# # 2. 定义柔和的发表级色盘
+# my_palette <- c(
+#   "#5050FF", "#CE3D32", "#749B58", "#F0E685", "#466983", "#BA6338", "#5DB1DD", "#802268",
+#   "#6BD76B", "#D595A7", "#924822", "#837B8D", "#C75127", "#D58F5C", "#7A65A5", "#E4AF69",
+#   "#3B1B53", "#CDDEB7", "#612A79", "#AE1F63", "#E7C453", "#5A655E", "#CC9900", "#99CC00",
+#   "#33CC00", "#00CC33", "#00CC99", "#0099CC", "#0033CC", "#3300CC", "#9900CC", "#CC0099",
+#   "#CC0033", "#FF3300", "#FF9900", "#FFFF00", "#99FF00", "#33FF00", "#00FF33", "#00FF99",
+#   "#0099FF", "#0033FF", "#3300FF", "#9900FF", "#CC00FF", "#FF00CC", "#FF0033", "#FF3333"
+# )
+# 
+# # 3. 截取并绑定名字
+# if(n_types > length(my_palette)){
+#   final_colors <- scales::hue_pal()(n_types)
+# } else {
+#   final_colors <- my_palette[1:n_types]
+# }
+# names(final_colors) <- unique_types 
+# 
+# # ------------------------------------------------------------------------------
+# # B. 定义增强版箭头主题 (图例位置在这里控制)
+# # ------------------------------------------------------------------------------
+# arrow_theme <- theme(
+#   axis.line = element_line(arrow = arrow(length = unit(0.25, "cm"), type = "closed"), size = 1), 
+#   axis.title = element_text(size = 14, face = "bold", hjust = 0.05), 
+#   plot.title = element_text(hjust = 0.5, size = 18, face = "bold"), 
+#   legend.text = element_text(size = 12),
+#   legend.position = "right" # 【关键】图例位置必须写在 theme 里
+# )
+# 
+# # ------------------------------------------------------------------------------
+# # C. 绘图与保存
+# # ------------------------------------------------------------------------------
+# plot_dir <- file.path(data_dir, "Results_Plots_scCustomize") 
+# if (!dir.exists(plot_dir)) dir.create(plot_dir)
+# 
+# print(paste("正在保存图片至:", plot_dir))
+# 
+# # --- 1. Total 图 ---
+# print("正在绘制: Total Integrated...")
+# p_total <- DimPlot_scCustom(
+#   seurat_object = obj, 
+#   group.by = plot_group, 
+#   colors_use = final_colors,  
+#   figure_plot = TRUE,         
+#   label = FALSE,              
+#   pt.size = 0.8               
+#   # 【修复】这里删除了 legend.position 参数
+# ) + arrow_theme + ggtitle(paste0("Total (Cells: ", ncol(obj), ")"))
+# 
+# ggsave(file.path(plot_dir, "01_UMAP_Total_scCustom.png"), p_total, width = 14, height = 12, dpi = 300)
+# 
+# # --- 2. WT 独立图 ---
+# print("正在绘制: WT Group...")
+# obj_wt <- subset(obj, subset = Group == "WT")
+# p_wt <- DimPlot_scCustom(
+#   seurat_object = obj_wt, 
+#   group.by = plot_group, 
+#   colors_use = final_colors,  
+#   figure_plot = TRUE,
+#   label = FALSE,
+#   pt.size = 0.8
+# ) + arrow_theme + ggtitle("WT Group")
+# 
+# ggsave(file.path(plot_dir, "02_UMAP_WT_scCustom.png"), p_wt, width = 14, height = 12, dpi = 300)
+# 
+# # --- 3. KO 独立图 ---
+# print("正在绘制: KO Group...")
+# obj_ko <- subset(obj, subset = Group == "KO")
+# p_ko <- DimPlot_scCustom(
+#   seurat_object = obj_ko, 
+#   group.by = plot_group, 
+#   colors_use = final_colors,
+#   figure_plot = TRUE,
+#   label = FALSE,
+#   pt.size = 0.8
+# ) + arrow_theme + ggtitle("KO Group")
+# 
+# ggsave(file.path(plot_dir, "03_UMAP_KO_scCustom.png"), p_ko, width = 14, height = 12, dpi = 300)
+# 
+# # --- 4. 对比图 (Split View) ---
+# print("正在绘制: Split Comparison...")
+# p_split <- DimPlot_scCustom(
+#   seurat_object = obj, 
+#   group.by = plot_group, 
+#   split.by = "Group",         
+#   colors_use = final_colors,
+#   figure_plot = TRUE,
+#   label = FALSE,
+#   pt.size = 0.8,
+#   num_columns = 2            
+# ) + arrow_theme + ggtitle("Condition Comparison: WT vs KO")
+# 
+# ggsave(file.path(plot_dir, "04_UMAP_Split_scCustom.png"), p_split, width = 16, height = 8, dpi = 300)
+# 
+# print("✅ 修复完成！图片已成功生成。")
