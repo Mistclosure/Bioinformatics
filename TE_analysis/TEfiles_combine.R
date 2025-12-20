@@ -7,7 +7,7 @@ setwd(wd)
 library(data.table)
 
 # 获取所有 .cntTable 文件
-files <- list.files(paste0(wd,'counts'), 
+files <- list.files(paste0(wd,'/counts'), 
                     pattern="\\.cntTable$", recursive=TRUE, full.names=TRUE)
 
 # 2. 读取并整合
