@@ -1,0 +1,56 @@
+# --- 1. 加载必要的包 ---
+library(Seurat)
+library(scDblFinder)
+library(SingleCellExperiment)
+library(copykat)
+
+# --- 2. 读取数据并转换为 SCE 对象 ---
+# 读取 10x 原始数据
+counts <- Read10X(data.dir = "D:/qiuzerui/BRCA-singlecells-Cryopreservation of human cancers conserves tumour heterogeneity for single-cell multi-omics analysis/")
+
+# scDblFinder 需要 SingleCellExperiment (SCE) 格式
+# 注意：直接用原始 counts 构建 SCE，不要做 log-transform
+sce <- SingleCellExperiment(assays = list(counts = counts))
+
+# --- 3. 运行 scDblFinder ---
+print("Running scDblFinder...")
+# scDblFinder 会自动处理标准化和聚类以寻找 Doublets
+sce <- scDblFinder(sce)
+
+# 查看识别结果 (singlet vs doublet)
+table(sce$scDblFinder.class)
+
+# --- 4. 过滤 Doublets ---
+# 只保留 Singlet (单细胞)
+sce.singlet <- sce[, sce$scDblFinder.class == "singlet"]
+
+print(paste0("原始细胞数: ", ncol(sce)))
+print(paste0("过滤后细胞数: ", ncol(sce.singlet)))
+
+# --- 5. 准备 CopyKAT 输入数据 ---
+# 提取过滤后的 Raw Counts
+# copyKAT 接受稀疏矩阵，所以直接提取即可，不用转 dense matrix 以节省内存
+raw_counts_singlet <- counts(sce.singlet)
+
+# --- 6. 运行 CopyKAT ---
+print("Running CopyKAT on singlets...")
+res.copykat <- copykat(
+  rawmat = raw_counts_singlet, 
+  id.type = "S",            # 基因符号
+  ngene.chr = 5, 
+  win.size = 25, 
+  KS.cut = 0.1, 
+  sam.name = "Breast_Singlets", 
+  distance = "euclidean", 
+  norm.cell.names = "",     # 自动寻找正常细胞基线
+  n.cores = 8               # 根据服务器核心数调整
+)
+
+# --- 7. 提取并保存 CNA 矩阵 ---
+# 这就是你需要的拷贝数矩阵
+cna_matrix <- res.copykat$CNAmat
+
+# 保存
+write.csv(cna_matrix,file = 'cna_matrix.csv')
+
+print("Done! CNA matrix saved.")
