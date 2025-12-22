@@ -1,1 +1,83 @@
+# --- 1. 加载必要的包 ---
+# 确保 scDblFinder 已经安装成功
+library(Matrix)
+library(SingleCellExperiment)
+library(scDblFinder) 
+library(copykat)
 
+# --- 2. 设置路径 ---
+data_dir <- "D:/qiuzerui/BRCA-singlecells-Cryopreservation of human cancers conserves tumour heterogeneity for single-cell multi-omics analysis/"
+
+# --- 3. 手动读取数据 (最稳健的读取方式) ---
+print(">>> 正在手动读取数据...")
+counts_matrix <- readMM(file = paste0(data_dir, "matrix.mtx.gz"))
+barcodes <- read.table(file = paste0(data_dir, "barcodes.tsv.gz"), header = FALSE, stringsAsFactors = FALSE)
+
+# 自动判断 features 文件名
+feat_path <- if(file.exists(paste0(data_dir, "features.tsv.gz"))) {
+  paste0(data_dir, "features.tsv.gz") 
+} else {
+  paste0(data_dir, "genes.tsv.gz")
+}
+features <- read.table(file = feat_path, header = FALSE, stringsAsFactors = FALSE, sep = "\t")
+
+# --- 4. 组装矩阵 ---
+# 自动处理基因列 (1列或2列的情况)
+if (ncol(features) == 1) {
+  gene_names <- features[, 1]
+} else {
+  gene_names <- features[, 2]
+}
+gene_names <- make.unique(gene_names) # 去重
+
+rownames(counts_matrix) <- gene_names
+colnames(counts_matrix) <- barcodes[, 1]
+
+print(paste0(">>> 原始细胞数量: ", ncol(counts_matrix)))
+
+# --- 5. 运行 scDblFinder (去双粘连体) ---
+print(">>> 正在运行 scDblFinder (寻找双粘连体)...")
+
+# scDblFinder 需要 SingleCellExperiment 对象
+sce <- SingleCellExperiment(assays = list(counts = counts_matrix))
+
+# 运行算法 (通常需要几分钟)
+sce <- scDblFinder(sce)
+
+# 查看识别结果
+print("scDblFinder 结果统计:")
+print(table(sce$scDblFinder.class))
+
+# 提取 Singlet (单细胞)
+sce.singlet <- sce[, sce$scDblFinder.class == "singlet"]
+print(paste0(">>> 过滤后剩余细胞数量: ", ncol(sce.singlet)))
+
+# --- 6. 准备 CopyKAT 输入数据 ---
+# 直接从 SCE 对象提取 Counts 矩阵，无需经过 Seurat，避免版本报错
+raw_counts_singlet <- counts(sce.singlet)
+
+# 确保是普通矩阵格式 (如果内存允许)
+raw_counts_singlet <- as.matrix(raw_counts_singlet)
+
+# --- 7. 运行 CopyKAT ---
+print(">>> 开始运行 CopyKAT...")
+res.copykat <- copykat(
+  rawmat = raw_counts_singlet, 
+  id.type = "S",            
+  ngene.chr = 5,            
+  win.size = 25,            
+  KS.cut = 0.1,             
+  sam.name = "Breast_scDblFinder_Run", # 输出文件名前缀
+  distance = "euclidean", 
+  norm.cell.names = "",     
+  n.cores = 8               
+)
+
+# --- 8. 保存结果 ---
+if(!is.null(res.copykat$CNAmat)) {
+  write.table(res.copykat$CNAmat, file = "CNA_Matrix_Filtered.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+  saveRDS(res.copykat$CNAmat, file = "CNA_Matrix_Filtered.rds")
+  print(">>> 成功！经过 scDblFinder 过滤的 CNA 矩阵已保存。")
+} else {
+  print(">>> CopyKAT 运行结束，未生成矩阵。")
+}
