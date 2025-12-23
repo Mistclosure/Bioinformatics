@@ -1,0 +1,51 @@
+library(Seurat)
+library(copykat)
+library(hdf5r) # 必须加载
+
+# --- 1. 设置文件路径 ---
+# 注意：这里要具体指向 .h5 文件，而不是文件夹
+setwd('/mnt/c/qiuzerui/BRCA_GSE110686')
+h5_file <- "/mnt/c/qiuzerui/BRCA_GSE110686/BRCA_GSE110686.h5"
+
+# --- 2. 读取数据 (使用 Read10X_h5) ---
+print(">>> 正在读取 .h5 文件...")
+# Read10X_h5 会自动处理基因名和 barcode，不用手动组装了！
+counts <- Read10X_h5(filename = h5_file)
+
+# 注意：有时候 .h5 里面包含多个数据类型(Gene Expression, Peaks等)
+# 如果 counts 读出来是一个 list，需要提取 Gene Expression
+if (is.list(counts) && "Gene Expression" %in% names(counts)) {
+  counts <- counts[["Gene Expression"]]
+}
+
+# --- 3. 创建 Seurat 对象与预处理 ---
+print(">>> 创建 Seurat 对象...")
+# 这里的 counts 已经是带有行列名的稀疏矩阵了
+seurat_obj <- CreateSeuratObject(counts = counts, min.cells = 3, min.features = 200)
+
+# 简单过滤双粘连体
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA < 6000)
+
+# --- 4. 提取矩阵供 CopyKAT 使用 (Seurat V5 写法) ---
+print(">>> 提取矩阵...")
+raw_counts_final <- as.matrix(seurat_obj[["RNA"]]$counts)
+
+# --- 5. 运行 CopyKAT (Linux 多核版) ---
+print(">>> 开始运行 CopyKAT...")
+res.copykat <- copykat(
+  rawmat = raw_counts_final, 
+  id.type = "S",            
+  ngene.chr = 5,            
+  win.size = 25,            
+  KS.cut = 0.1,             
+  sam.name = "Breast_H5_Run", 
+  distance = "euclidean", 
+  norm.cell.names = "",     
+  n.cores = 180   # WSL/Linux 下可以使用多核
+)
+
+# --- 6. 保存结果 ---
+if(!is.null(res.copykat$CNAmat)) {
+  write.csv(res.copykat$CNAmat, file = "CNA_Matrix.csv")
+  print(">>> 成功！")
+}
