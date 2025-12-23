@@ -1,51 +1,163 @@
+# ==============================================================================
+# 0. 加载所有必要的库
+# ==============================================================================
+library(scDblFinder)
+library(SingleCellExperiment)
 library(Seurat)
+library(BiocParallel)
 library(copykat)
-library(hdf5r) # 必须加载
+library(hdf5r)
+library(infercnv)
+library(data.table)
 
-# --- 1. 设置文件路径 ---
-# 注意：这里要具体指向 .h5 文件，而不是文件夹
-setwd('/mnt/c/qiuzerui/BRCA_GSE110686')
-h5_file <- "/mnt/c/qiuzerui/BRCA_GSE110686/BRCA_GSE110686.h5"
+# ==============================================================================
+# 1. 定义函数：自动读取数据并去除双细胞
+# ==============================================================================
+run_scDblFinder_auto <- function(input_path, n_threads = 40) { # 默认改小
+  
+  message(paste0(">>> [Step 1] 正在读取数据: ", input_path))
+  
+  counts_matrix <- NULL
+  if (dir.exists(input_path)) {
+    message("    检测到目录，使用 Read10X 读取...")
+    counts_matrix <- Read10X(data.dir = input_path)
+  } else if (grepl("\\.h5$", input_path, ignore.case = TRUE)) {
+    message("    检测到 .h5 文件，使用 Read10X_h5 读取...")
+    counts_matrix <- Read10X_h5(filename = input_path)
+  } else {
+    stop("错误: 无法识别的文件格式或路径不存在。")
+  }
+  
+  if (is.list(counts_matrix) && !is(counts_matrix, "dgCMatrix")) {
+    if ("Gene Expression" %in% names(counts_matrix)) {
+      counts_matrix <- counts_matrix$`Gene Expression`
+    } else {
+      counts_matrix <- counts_matrix[[1]]
+    }
+  }
 
-# --- 2. 读取数据 (使用 Read10X_h5) ---
-print(">>> 正在读取 .h5 文件...")
-# Read10X_h5 会自动处理基因名和 barcode，不用手动组装了！
-counts <- Read10X_h5(filename = h5_file)
-
-# 注意：有时候 .h5 里面包含多个数据类型(Gene Expression, Peaks等)
-# 如果 counts 读出来是一个 list，需要提取 Gene Expression
-if (is.list(counts) && "Gene Expression" %in% names(counts)) {
-  counts <- counts[["Gene Expression"]]
+  sce <- SingleCellExperiment(assays = list(counts = counts_matrix))
+  
+  message(paste0(">>> [Step 2] 运行 scDblFinder (线程数: ", n_threads, ")..."))
+  bp_param <- MulticoreParam(workers = n_threads, progressbar = TRUE)
+  sce <- scDblFinder(sce, BPPARAM = bp_param)
+  
+  table_dbl <- table(sce$scDblFinder.class)
+  message("    双细胞检测结果:")
+  print(table_dbl)
+  
+  sce_filtered <- sce[, sce$scDblFinder.class == "singlet"]
+  message(paste0("    过滤完成。剩余细胞数: ", ncol(sce_filtered)))
+  
+  return(sce_filtered)
 }
 
-# --- 3. 创建 Seurat 对象与预处理 ---
-print(">>> 创建 Seurat 对象...")
-# 这里的 counts 已经是带有行列名的稀疏矩阵了
-seurat_obj <- CreateSeuratObject(counts = counts, min.cells = 3, min.features = 200)
+# ==============================================================================
+# 2. 定义函数：CNV 分析流程 (CopyKAT + inferCNV)
+# ==============================================================================
+run_cnv_pipeline <- function(sce_obj, output_dir, n_threads = 40, project_name = "MyProject") {
+  
+  if(!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  setwd(output_dir)
+  
+  message(">>> [Step 3] 转换为 Seurat 对象 (保留所有 Singlet)...")
+  
+  seurat_obj <- as.Seurat(sce_obj, counts = "counts", data = NULL)
+  seurat_obj <- RenameAssays(seurat_obj, originalexp = "RNA") 
+  
+  # --- 内存保护检查 ---
+  cell_count <- ncol(seurat_obj)
+  if (cell_count > 50000 && n_threads > 30) {
+    message("警告: 细胞数 > 5万，为防止内存溢出，强制将线程数限制为 30。")
+    n_threads <- 30
+  }
+  
+  message(paste0("    分析细胞数: ", cell_count))
+  
+  # --- 运行 CopyKAT ---
+  message(paste0(">>> [Step 4] 运行 CopyKAT (线程数: ", n_threads, ")..."))
+  
+  raw_counts_final <- as.matrix(seurat_obj[["RNA"]]$counts)
+  
+  res.copykat <- copykat(
+    rawmat = raw_counts_final, 
+    id.type = "S",            
+    ngene.chr = 5,            
+    win.size = 25,            
+    KS.cut = 0.1,             
+    sam.name = project_name, 
+    distance = "euclidean", 
+    norm.cell.names = "",     
+    n.cores = n_threads  
+  )
+  
+  if(!is.null(res.copykat$CNAmat)) {
+    write.csv(res.copykat$CNAmat, file = paste0(project_name, "_CopyKAT_CNA_Matrix.csv"))
+    saveRDS(res.copykat, file = paste0(project_name, "_CopyKAT_Result.rds"))
+  } else {
+    stop("CopyKAT 失败。")
+  }
+  
+  # --- 准备 inferCNV ---
+  message(">>> [Step 5] 准备 inferCNV 输入...")
+  
+  pred.test <- res.copykat$prediction
+  valid_cells <- pred.test$cell.names[pred.test$copykat.pred %in% c("aneuploid", "diploid")]
+  
+  if(length(valid_cells) == 0) stop("无有效细胞。")
+  
+  infer_annot <- pred.test[pred.test$cell.names %in% valid_cells, ]
+  infer_annot$group <- ifelse(infer_annot$copykat.pred == "diploid", "Normal", "Tumor")
+  annot_df <- data.frame(row.names = infer_annot$cell.names, type = infer_annot$group)
+  infer_counts <- raw_counts_final[, valid_cells]
+  
+  gene_order <- res.copykat$CNAmat[, 1:3]
+  gene_loc_df <- data.frame(Gene = rownames(gene_order), Chr = gene_order$chrom, Start = gene_order$chrompos, End = gene_order$chrompos)
+  rownames(gene_loc_df) <- gene_loc_df$Gene
+  gene_loc_df$Gene <- NULL
+  
+  # --- 运行 inferCNV ---
+  message(">>> [Step 6 & 7] 运行 inferCNV (HMM模式)...")
+  
+  infercnv_obj = CreateInfercnvObject(
+    raw_counts_matrix = infer_counts,
+    annotations_file = annot_df,      
+    gene_order_file = gene_loc_df,    
+    ref_group_names = c("Normal")
+  )
+  
+  infercnv_obj = infercnv::run(
+    infercnv_obj,
+    cutoff = 0.1,             
+    out_dir = "infercnv_output", 
+    cluster_by_groups = TRUE, 
+    denoise = TRUE,            
+    HMM = TRUE,                
+    HMM_type = "i6",           
+    analysis_mode = "subclusters", 
+    num_threads = n_threads   # 使用安全线程数
+  )
+  
+  message(">>> 完成。")
+}
 
-# 简单过滤双粘连体
-seurat_obj <- subset(seurat_obj, subset = nFeature_RNA < 6000)
+# ==============================================================================
+# 3. 主程序执行区 (安全配置)
+# ==============================================================================
 
-# --- 4. 提取矩阵供 CopyKAT 使用 (Seurat V5 写法) ---
-print(">>> 提取矩阵...")
-raw_counts_final <- as.matrix(seurat_obj[["RNA"]]$counts)
+INPUT_FILE <- "/mnt/c/qiuzerui/BRCA_GSE110686/BRCA_GSE110686.h5"
+WORK_DIR   <- "/mnt/c/qiuzerui/BRCA_GSE110686"
 
-# --- 5. 运行 CopyKAT (Linux 多核版) ---
-print(">>> 开始运行 CopyKAT...")
-res.copykat <- copykat(
-  rawmat = raw_counts_final, 
-  id.type = "S",            
-  ngene.chr = 5,            
-  win.size = 25,            
-  KS.cut = 0.1,             
-  sam.name = "Breast_H5_Run", 
-  distance = "euclidean", 
-  norm.cell.names = "",     
-  n.cores = 180   # WSL/Linux 下可以使用多核
+# [重要修改] 根据 256GB 内存，建议线程数设置为 40
+THREADS    <- 40 
+
+setwd(WORK_DIR)
+
+clean_sce <- run_scDblFinder_auto(INPUT_FILE, n_threads = THREADS)
+
+run_cnv_pipeline(
+  sce_obj = clean_sce, 
+  output_dir = WORK_DIR, 
+  n_threads = THREADS, 
+  project_name = "BRCA_Analysis"
 )
-
-# --- 6. 保存结果 ---
-if(!is.null(res.copykat$CNAmat)) {
-  write.csv(res.copykat$CNAmat, file = "CNA_Matrix.csv")
-  print(">>> 成功！")
-}
