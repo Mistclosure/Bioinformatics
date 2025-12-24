@@ -196,6 +196,8 @@ if (file.exists(db_file_path)) {
   message("⚠️ 未找到 ScType 数据库，跳过注释，使用 Cluster ID 绘图")
   obj$cell_type <- obj$seurat_clusters
 }
+#大脑皮层细胞不应含有Tanycytes，经过鉴定为Mature Neurons
+obj[["cell_type"]][obj[["cell_type"]] == "Tanycytes"] <- "Mature neurons"
 
 # ==============================================================================
 # 7. 结果可视化与输出 (无清洗版：直接使用原始 ScType 注释 + PNG输出)
