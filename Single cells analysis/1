@@ -1,5 +1,5 @@
 # ==============================================================================
-# 0. 加载所有必要的库
+# 0. 加载必要的库
 # ==============================================================================
 library(scDblFinder)
 library(SingleCellExperiment)
@@ -9,116 +9,197 @@ library(copykat)
 library(hdf5r)
 library(infercnv)
 library(data.table)
+library(dplyr)
+
+# 必须加载注释库 (如果没有请运行: BiocManager::install("EnsDb.Hsapiens.v86"))
+if (!require("EnsDb.Hsapiens.v86")) {
+  stop("请先安装注释库，复制运行: BiocManager::install('EnsDb.Hsapiens.v86')")
+}
+library(EnsDb.Hsapiens.v86) 
 
 # ==============================================================================
-# 1. 定义函数：自动读取数据并去除双细胞
+# 1. [函数] 自动读取与去双细胞 (支持 h5)
 # ==============================================================================
-run_scDblFinder_auto <- function(input_path, n_threads = 40) { # 默认改小
-  
-  message(paste0(">>> [Step 1] 正在读取数据: ", input_path))
+run_scDblFinder_auto <- function(input_path, n_threads = 40) {
+  message(paste0(">>> [Step 1] 读取数据: ", input_path))
   
   counts_matrix <- NULL
-  if (dir.exists(input_path)) {
-    message("    检测到目录，使用 Read10X 读取...")
-    counts_matrix <- Read10X(data.dir = input_path)
-  } else if (grepl("\\.h5$", input_path, ignore.case = TRUE)) {
-    message("    检测到 .h5 文件，使用 Read10X_h5 读取...")
+  # 专门针对 .h5 的读取逻辑
+  if (grepl("\\.h5$", input_path, ignore.case = TRUE)) {
+    message("    识别为 H5 格式，使用 Read10X_h5...")
     counts_matrix <- Read10X_h5(filename = input_path)
+  } else if (dir.exists(input_path)) {
+    counts_matrix <- Read10X(data.dir = input_path)
   } else {
-    stop("错误: 无法识别的文件格式或路径不存在。")
+    stop("错误: 路径既不是 .h5 文件也不是文件夹。")
   }
   
+  # 兼容性处理：如果读出来是列表，取 Gene Expression
   if (is.list(counts_matrix) && !is(counts_matrix, "dgCMatrix")) {
-    if ("Gene Expression" %in% names(counts_matrix)) {
-      counts_matrix <- counts_matrix$`Gene Expression`
-    } else {
-      counts_matrix <- counts_matrix[[1]]
-    }
+    counts_matrix <- if ("Gene Expression" %in% names(counts_matrix)) counts_matrix$`Gene Expression` else counts_matrix[[1]]
   }
-
+  
+  # --- 关键检查：确保读出来的基因名是正常的 ---
+  if (all(grepl("^[0-9]+$", head(rownames(counts_matrix))))) {
+    # 如果读出来全是数字，说明 H5 内部确实有点怪，但我们可以尝试补救(通常不会发生)
+    stop("错误: .h5 文件读取后基因名丢失(全是数字)。请检查该文件来源。")
+  }
+  
   sce <- SingleCellExperiment(assays = list(counts = counts_matrix))
+  message(paste0(">>> [Step 2] scDblFinder (线程: ", n_threads, ")..."))
+  # 降低多线程开销
+  sce <- scDblFinder(sce, BPPARAM = MulticoreParam(workers = n_threads))
   
-  message(paste0(">>> [Step 2] 运行 scDblFinder (线程数: ", n_threads, ")..."))
-  bp_param <- MulticoreParam(workers = n_threads, progressbar = TRUE)
-  sce <- scDblFinder(sce, BPPARAM = bp_param)
-  
-  table_dbl <- table(sce$scDblFinder.class)
-  message("    双细胞检测结果:")
-  print(table_dbl)
-  
-  sce_filtered <- sce[, sce$scDblFinder.class == "singlet"]
-  message(paste0("    过滤完成。剩余细胞数: ", ncol(sce_filtered)))
-  
-  return(sce_filtered)
+  return(sce[, sce$scDblFinder.class == "singlet"])
 }
 
 # ==============================================================================
-# 2. 定义函数：CNV 分析流程 (CopyKAT + inferCNV)
+# 2. [关键函数] 使用数据库生成基因坐标 (彻底解决基因名不匹配问题)
 # ==============================================================================
-run_cnv_pipeline <- function(sce_obj, output_dir, n_threads = 40, project_name = "MyProject") {
+generate_gene_loc_from_ensdb <- function(gene_list) {
+  message(">>> [坐标重构] 正在利用数据库为基因匹配染色体位置...")
+  
+  # 1. 从 EnsDb 提取全人类基因坐标
+  edb <- EnsDb.Hsapiens.v86
+  # 提取 gene_name (Symbol) 作为主键
+  all_genes <- genes(edb, columns = c("gene_name", "seq_name", "gene_seq_start", "gene_seq_end"), return.type = "DataFrame")
+  df_db <- as.data.frame(all_genes)
+  
+  # 2. 找交集：你的数据 vs 数据库
+  # 注意：你的数据可能是 Symbol (TP53) 也可能是 EnsemblID (ENSG...)
+  # 这里的逻辑假设你是 Symbol (因为你看过是 FO538757.2 这种)
+  common_genes <- intersect(gene_list, df_db$gene_name)
+  
+  if (length(common_genes) < 100) {
+    message("!!! 警告: 匹配到的基因极少。尝试匹配 Ensembl ID...")
+    # 备用方案：尝试匹配 ID
+    all_genes_id <- genes(edb, columns = c("gene_id", "seq_name", "gene_seq_start", "gene_seq_end"), return.type = "DataFrame")
+    df_db_id <- as.data.frame(all_genes_id)
+    common_genes_id <- intersect(gene_list, df_db_id$gene_id)
+    
+    if (length(common_genes_id) > length(common_genes)) {
+      message("    -> 确认为 Ensembl ID 格式。")
+      df_db <- df_db_id
+      colnames(df_db)[1] <- "gene_name" # 统一列名方便后续处理
+      common_genes <- common_genes_id
+    } else {
+      stop("严重错误: 无论是 Symbol 还是 ID，都无法在数据库中找到匹配的基因。请检查你的数据基因名格式。")
+    }
+  }
+  
+  message(paste0("    成功匹配并生成坐标: ", length(common_genes), " 个基因。"))
+  
+  # 3. 整理输出
+  df_final <- df_db[df_db$gene_name %in% common_genes, ]
+  # 去重：防止一个基因对应多个位置
+  df_final <- df_final[!duplicated(df_final$gene_name), ]
+  rownames(df_final) <- df_final$gene_name
+  
+  # 输出 InferCNV 标准格式: Chr, Start, Stop
+  out_df <- data.frame(
+    Chr = df_final$seq_name,
+    Start = df_final$gene_seq_start,
+    Stop = df_final$gene_seq_end,
+    row.names = df_final$gene_name
+  )
+  
+  return(out_df)
+}
+
+# ==============================================================================
+# 3. [函数] HMM 矩阵转换 (保持不变)
+# ==============================================================================
+hmm_regions_to_matrix <- function(infercnv_obj, output_dir) {
+  hmm_files <- list.files(output_dir, pattern = "HMM_CNV_predictions.*\\.pred_cnv_regions\\.dat", full.names = TRUE)
+  if(length(hmm_files)==0) return(NULL)
+  
+  hmm_data <- read.table(hmm_files[1], header = TRUE, stringsAsFactors = FALSE)
+  tumor_indices <- unlist(infercnv_obj@observation_grouped_cell_indices)
+  target_cells <- colnames(infercnv_obj@expr.data)[tumor_indices]
+  all_genes <- rownames(infercnv_obj@expr.data)
+  
+  hmm_matrix <- matrix(3L, nrow = length(all_genes), ncol = length(target_cells))
+  rownames(hmm_matrix) <- all_genes
+  colnames(hmm_matrix) <- target_cells
+  
+  gene_dt <- data.table(gene = all_genes, index = 1:length(all_genes))
+  setkey(gene_dt, gene)
+  
+  subclusters <- infercnv_obj@tumor_subclusters$subclusters
+  gene_order <- infercnv_obj@gene_order
+  
+  for (i in 1:nrow(hmm_data)) {
+    rec <- hmm_data[i, ]
+    state <- as.integer(rec$state)
+    if (state == 3) next 
+    
+    group_name <- rec$cell_group_name
+    cell_indices <- subclusters[[group_name]]
+    if (is.null(cell_indices)) cell_indices <- subclusters[[gsub("all_observations\\.", "", group_name)]]
+    
+    group_cells <- colnames(infercnv_obj@expr.data)[cell_indices]
+    valid_cells <- intersect(group_cells, target_cells)
+    if (length(valid_cells) == 0) next
+    
+    genes_in_region <- rownames(gene_order[gene_order$chr == rec$chr & gene_order$start >= rec$start & gene_order$stop <= rec$end, ])
+    if (length(genes_in_region) > 0) hmm_matrix[gene_dt[genes_in_region, index], valid_cells] <- state
+  }
+  return(hmm_matrix)
+}
+
+# ==============================================================================
+# 4. [主流程] 最终执行版
+# ==============================================================================
+run_cnv_pipeline_final <- function(sce_obj, output_dir, n_threads = 40, project_name = "BRCA_Analysis") {
   
   if(!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
   setwd(output_dir)
   
-  message(">>> [Step 3] 转换为 Seurat 对象 (保留所有 Singlet)...")
-  
+  # --- Step 3: 数据准备 ---
+  message(">>> [Step 3] 转换为 Seurat 对象...")
   seurat_obj <- as.Seurat(sce_obj, counts = "counts", data = NULL)
   seurat_obj <- RenameAssays(seurat_obj, originalexp = "RNA") 
-  
-  # --- 内存保护检查 ---
-  cell_count <- ncol(seurat_obj)
-  if (cell_count > 50000 && n_threads > 30) {
-    message("警告: 细胞数 > 5万，为防止内存溢出，强制将线程数限制为 30。")
-    n_threads <- 30
-  }
-  
-  message(paste0("    分析细胞数: ", cell_count))
-  
-  # --- 运行 CopyKAT ---
-  message(paste0(">>> [Step 4] 运行 CopyKAT (线程数: ", n_threads, ")..."))
-  
   raw_counts_final <- as.matrix(seurat_obj[["RNA"]]$counts)
   
-  res.copykat <- copykat(
-    rawmat = raw_counts_final, 
-    id.type = "S",            
-    ngene.chr = 5,            
-    win.size = 25,            
-    KS.cut = 0.1,             
-    sam.name = project_name, 
-    distance = "euclidean", 
-    norm.cell.names = "",     
-    n.cores = n_threads  
-  )
+  # --- Step 4: CopyKAT (只为获取细胞分类) ---
+  message(">>> [Step 4] 运行/读取 CopyKAT...")
+  res.copykat <- NULL
+  ckpt_file <- paste0(project_name, "_CopyKAT_Result.rds")
   
-  if(!is.null(res.copykat$CNAmat)) {
-    write.csv(res.copykat$CNAmat, file = paste0(project_name, "_CopyKAT_CNA_Matrix.csv"))
-    saveRDS(res.copykat, file = paste0(project_name, "_CopyKAT_Result.rds"))
+  if (file.exists(ckpt_file)) {
+    message("    读取已有结果...")
+    res.copykat <- readRDS(ckpt_file)
   } else {
-    stop("CopyKAT 失败。")
+    res.copykat <- copykat(rawmat = raw_counts_final, id.type = "S", ngene.chr = 5, win.size = 25, KS.cut = 0.1, sam.name = project_name, distance = "euclidean", n.cores = n_threads)
+    saveRDS(res.copykat, file = ckpt_file)
   }
   
-  # --- 准备 inferCNV ---
+  # --- Step 5: 准备 InferCNV (核心修复) ---
   message(">>> [Step 5] 准备 inferCNV 输入...")
   
+  # 1. 提取细胞分类 (Tumor/Normal)
   pred.test <- res.copykat$prediction
+  if (is.null(pred.test)) stop("CopyKAT 结果异常: prediction 为空")
   valid_cells <- pred.test$cell.names[pred.test$copykat.pred %in% c("aneuploid", "diploid")]
-  
-  if(length(valid_cells) == 0) stop("无有效细胞。")
   
   infer_annot <- pred.test[pred.test$cell.names %in% valid_cells, ]
   infer_annot$group <- ifelse(infer_annot$copykat.pred == "diploid", "Normal", "Tumor")
   annot_df <- data.frame(row.names = infer_annot$cell.names, type = infer_annot$group)
   infer_counts <- raw_counts_final[, valid_cells]
   
-  gene_order <- res.copykat$CNAmat[, 1:3]
-  gene_loc_df <- data.frame(Gene = rownames(gene_order), Chr = gene_order$chrom, Start = gene_order$chrompos, End = gene_order$chrompos)
-  rownames(gene_loc_df) <- gene_loc_df$Gene
-  gene_loc_df$Gene <- NULL
+  # 2. [关键] 使用 EnsDb 生成干净的基因位置文件
+  # 不再依赖 CopyKAT 那个坏掉的矩阵
+  gene_loc_df <- generate_gene_loc_from_ensdb(rownames(infer_counts))
   
-  # --- 运行 inferCNV ---
-  message(">>> [Step 6 & 7] 运行 inferCNV (HMM模式)...")
+  # 3. 对齐
+  common_genes <- intersect(rownames(infer_counts), rownames(gene_loc_df))
+  message(paste0("    最终进入分析的基因数: ", length(common_genes)))
   
+  infer_counts <- infer_counts[common_genes, ]
+  gene_loc_df <- gene_loc_df[common_genes, ]
+  
+  # --- Step 6 & 7: 运行 InferCNV ---
+  message(">>> [Step 6] 初始化与运行 InferCNV...")
   infercnv_obj = CreateInfercnvObject(
     raw_counts_matrix = infer_counts,
     annotations_file = annot_df,      
@@ -127,37 +208,43 @@ run_cnv_pipeline <- function(sce_obj, output_dir, n_threads = 40, project_name =
   )
   
   infercnv_obj = infercnv::run(
-    infercnv_obj,
-    cutoff = 0.1,             
-    out_dir = "infercnv_output", 
-    cluster_by_groups = TRUE, 
-    denoise = TRUE,            
-    HMM = TRUE,                
-    HMM_type = "i6",           
-    analysis_mode = "subclusters", 
-    num_threads = n_threads   # 使用安全线程数
+    infercnv_obj, cutoff = 0.1, out_dir = "infercnv_output", 
+    cluster_by_groups = TRUE, denoise = TRUE, HMM = TRUE, HMM_type = "i6", 
+    analysis_mode = "subclusters", num_threads = n_threads, output_format = "pdf"
   )
   
-  message(">>> 完成。")
+  # --- Step 8: 提取矩阵 ---
+  message(">>> [Step 8] 提取最终结果矩阵...")
+  tumor_indices <- unlist(infercnv_obj@observation_grouped_cell_indices)
+  tumor_cells <- colnames(infercnv_obj@expr.data)[tumor_indices]
+  
+  float_matrix <- infercnv_obj@expr.data[, tumor_cells]
+  integer_matrix <- hmm_regions_to_matrix(infercnv_obj, "infercnv_output")
+  
+  # 最终对齐
+  common_final <- intersect(rownames(float_matrix), rownames(integer_matrix))
+  common_cells <- intersect(colnames(float_matrix), colnames(integer_matrix))
+  
+  saveRDS(float_matrix[common_final, common_cells], "Final_Float_Intensity_Matrix.rds")
+  saveRDS(integer_matrix[common_final, common_cells], "Final_Integer_HMM_Matrix.rds")
+  saveRDS(infercnv_obj, "Final_InferCNV_Object.rds")
+  
+  message(">>> 全部完成！")
 }
 
 # ==============================================================================
-# 3. 主程序执行区 (安全配置)
+# 5. 执行区
 # ==============================================================================
-
-INPUT_FILE <- "/mnt/c/qiuzerui/BRCA_GSE110686/BRCA_GSE110686.h5"
-WORK_DIR   <- "/mnt/c/qiuzerui/BRCA_GSE110686"
-
-# [重要修改] 根据 256GB 内存，建议线程数设置为 40
+INPUT_FILE <- "/home/ubuntu/qiuzerui/sc/BRCA_GSE110686.h5"
+WORK_DIR   <- "/home/ubuntu/qiuzerui/sc"
 THREADS    <- 40 
 
 setwd(WORK_DIR)
 
-clean_sce <- run_scDblFinder_auto(INPUT_FILE, n_threads = THREADS)
+# 1. 读取
+if (!exists("clean_sce")) {
+  clean_sce <- run_scDblFinder_auto(INPUT_FILE, n_threads = THREADS)
+}
 
-run_cnv_pipeline(
-  sce_obj = clean_sce, 
-  output_dir = WORK_DIR, 
-  n_threads = THREADS, 
-  project_name = "BRCA_Analysis"
-)
+# 2. 运行
+run_cnv_pipeline_final(clean_sce, WORK_DIR, THREADS, "BRCA_Analysis")
