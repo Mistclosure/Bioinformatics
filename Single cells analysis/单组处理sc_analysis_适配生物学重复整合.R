@@ -329,6 +329,58 @@ ggsave(file.path(stats_dir, "05_Cell_Proportion_Barplot.png"),
 write.csv(prop_data, file.path(stats_dir, "05_Cell_Proportion_Table.csv"), row.names = FALSE)
 
 print("✅ 细胞比例图已生成！")
+# ==============================================================================
+# 8.2 [可选] 补充分析：按样本查看重复一致性 (Per Sample Check)
+# ==============================================================================
+print("🚀 [可选步骤] 正在生成按样本(Sample)拆分的比例图，用于检查重复一致性...")
+
+# 1. 计算按样本的比例数据
+# ------------------------------------------------------------------------------
+# 注意：group_by 中增加了 SampleID
+prop_data_sample <- meta_df %>%
+  group_by(SampleID, Group, cell_type) %>%  # 保留 Group 是为了画图时能分栏
+  summarise(Count = n(), .groups = 'drop') %>%
+  group_by(SampleID) %>%
+  mutate(
+    Total = sum(Count),
+    Percent = Count / Total,
+    # 标签逻辑：比例 > 3% 显示数值，否则留空
+    Label = ifelse(Percent > 0.03, paste0(round(Percent * 100, 1), "%"), "")
+  )
+
+# 2. 绘制分面柱状图 (Facet Plot)
+# ------------------------------------------------------------------------------
+p_barplot_sample <- ggplot(prop_data_sample, aes(x = SampleID, y = Percent, fill = cell_type)) +
+  geom_bar(stat = "identity", position = "fill", width = 0.8) +
+  geom_text(aes(label = Label), 
+            position = position_fill(vjust = 0.5), 
+            size = 3, color = "black") +
+  scale_y_continuous(labels = scales::percent) +
+  # 关键步骤：使用 facet_grid 按 Group 分栏，让 WT 的两个样本挨在一起，KO 的挨在一起
+  facet_grid(~Group, scales = "free_x", space = "free") + 
+  labs(x = "Sample ID", y = "Cell Proportion (%)", 
+       title = "Cell Type Proportion: Check Replicates Consistency") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10), # X轴文字斜着放，防止重叠
+    legend.position = "right",
+    legend.title = element_blank(),
+    strip.background = element_rect(fill = "#EFEFEF", color = NA), # 分面标题背景色
+    strip.text = element_text(face = "bold", size = 12)
+  )
+
+# 3. 保存结果
+# ------------------------------------------------------------------------------
+# 保存图片
+ggsave(file.path(stats_dir, "05_Cell_Proportion_Barplot_PerSample.png"), 
+       plot = p_barplot_sample, width = 10, height = 6, dpi = 300)
+
+# 保存表格
+write.csv(prop_data_sample, file.path(stats_dir, "05_Cell_Proportion_Table_PerSample.csv"), row.names = FALSE)
+
+print("✅ 按样本检查图已生成！请查看: 05_Cell_Proportion_Barplot_PerSample.png")
+print("   -> 观察提示：请检查同一组内(如 WT1 和 WT2) 的柱子颜色分布是否高度相似。")
 
 # ==============================================================================
 # 9. 差异分析 (KO vs WT, 循环所有细胞类型)
