@@ -1,9 +1,10 @@
 # ==========================================
-# TE Analysis Pipeline (完整通用版)
+# TE Analysis Pipeline (硬件优化版)
 # ==========================================
-# 适配: Ubuntu用户路径 / 智能识别文件名 / 无中断运行
+# 硬件适配: AMD EPYC 7R32 (48 Cores) / 250G RAM
+# 优化策略: 降低线程竞争，大幅提升内存利用率
 
-# 1. 尝试初始化 conda (以防直接粘贴时 conda 命令不可用)
+# 1. 尝试初始化 conda
 if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
     source "$HOME/miniconda3/etc/profile.d/conda.sh"
 elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
@@ -14,14 +15,23 @@ fi
 conda activate qiuzerui
 
 # ======================
-# 配置区域
+# 🚀 核心配置区域 (已根据 btop 截图调整)
 # ======================
-# 资源
-HIGH_THREADS=128  
-MID_THREADS=48
-LOW_THREADS=16
 
-# 路径 (绝对路径)
+# [CPU 策略]
+# 你的 CPU 是 48 核。设置 48 线程能跑满物理核心，效率最高。
+# 之前设置 128 会导致过载，反而变慢。
+HIGH_THREADS=48   
+MID_THREADS=24    # 用于压缩 (pigz)，24 线程足够跑满磁盘写入带宽
+LOW_THREADS=8     # 用于 fastp 这种轻量级任务
+
+# [内存 策略]
+# fastq-dump 内存: 从 2GB 提升到 16GB (加速解压)
+DUMP_MEM="16384MB"
+# STAR 排序内存: 从 60GB 提升到 100GB (你内存空闲 230G，不用白不用)
+STAR_RAM="100000000000"
+
+# [路径配置]
 BASE_DIR="/home/ubuntu/qiuzerui"
 WORKDIR="${BASE_DIR}/RNA-seq/Y90C_CMV-Cre"
 
@@ -66,15 +76,16 @@ if [ ${#sra_files[@]} -gt 0 ]; then
         filename=$(basename ${sra_file})
         sample_name=${filename%.sra}
         
-        # 检查是否已存在 (支持 .fastq.gz 和 .fq.gz)
+        # 检查是否已存在
         if ls "${RAW_DIR}/${sample_name}"_*.gz &> /dev/null; then
             continue
         fi
 
         echo "正在处理: ${sample_name}"
         if command -v fasterq-dump &> /dev/null; then
-            fasterq-dump --split-3 -e ${MID_THREADS} -m 2048MB --outdir ${RAW_DIR} --progress ${sra_file}
-            # 压缩
+            # 优化: 使用更大的内存 (DUMP_MEM)
+            fasterq-dump --split-3 -e ${MID_THREADS} -m ${DUMP_MEM} --outdir ${RAW_DIR} --progress ${sra_file}
+            
             if command -v pigz &> /dev/null; then
                 pigz -p ${MID_THREADS} ${RAW_DIR}/${sample_name}_1.fastq
                 pigz -p ${MID_THREADS} ${RAW_DIR}/${sample_name}_2.fastq
@@ -108,18 +119,14 @@ if [ ${#all_files[@]} -gt 0 ]; then
         filename=$(basename "${r1_file}")
 
         # --- 智能匹配逻辑 ---
-        # 1. 跳过 R2 文件
         if [[ "$filename" =~ _2\.(fastq|fq)\.gz$ ]] || [[ "$filename" =~ _R2\.(fastq|fq)\.gz$ ]]; then
             continue
         fi
 
-        # 2. 识别 R1 格式
         if [[ "$filename" =~ _R1\.(fastq|fq)\.gz$ ]]; then
-            # 格式: Sample_R1.fq.gz
             r2_filename="${filename/_R1./_R2.}"
             sample_name=$(echo "$filename" | sed -E 's/_R1\.(fastq|fq)\.gz$//')
         elif [[ "$filename" =~ _1\.(fastq|fq)\.gz$ ]]; then
-            # 格式: Sample_1.fastq.gz
             r2_filename="${filename/_1./_2.}"
             sample_name=$(echo "$filename" | sed -E 's/_1\.(fastq|fq)\.gz$//')
         else
@@ -128,13 +135,11 @@ if [ ${#all_files[@]} -gt 0 ]; then
 
         r2_file="${RAW_DIR}/${r2_filename}"
 
-        # 检查 R2 是否存在
         if [ ! -f "$r2_file" ]; then
             echo "❌ [报错] 样本 $sample_name 缺少 R2 文件 ($r2_filename)，跳过。"
             continue
         fi
 
-        # 检查 BAM 是否已存在
         if [ -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
             echo "✅ [跳过] ${sample_name} 比对已完成。"
             continue
@@ -163,7 +168,6 @@ if [ ${#all_files[@]} -gt 0 ]; then
                         --un-conc-gz "${CLEAN_DIR}/${sample_name}_clean" \
                         > /dev/null 2>&1
                 
-                # 重命名输出
                 mv "${CLEAN_DIR}/${sample_name}_clean.1" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.1.gz" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz"
                 mv "${CLEAN_DIR}/${sample_name}_clean.2" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.2.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz"
             else
@@ -175,6 +179,7 @@ if [ ${#all_files[@]} -gt 0 ]; then
         if [ ! -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
             echo "   -> [STAR] 比对..."
             if [ -d "${STAR_INDEX}" ]; then
+                # 优化: 使用更大的 limitBAMsortRAM
                 STAR --runThreadN ${HIGH_THREADS} --genomeDir "${STAR_INDEX}" \
                      --readFilesIn "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" \
                      --readFilesCommand zcat \
@@ -183,7 +188,7 @@ if [ ${#all_files[@]} -gt 0 ]; then
                      --winAnchorMultimapNmax 500 --outFilterMultimapNmax 500 \
                      --outMultimapperOrder Random --quantMode GeneCounts --outSAMattributes All \
                      --genomeSAsparseD 3 \
-                     --limitBAMsortRAM 60000000000 > /dev/null
+                     --limitBAMsortRAM ${STAR_RAM} > /dev/null
 
                 samtools index -@ 32 "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam"
             else
