@@ -1,7 +1,8 @@
 # ==========================================
-# TE Analysis Pipeline (修复 ulimit 版)
+# TE Analysis Pipeline (稳定串行 + featureCounts版)
 # ==========================================
-# 修复: 增加最大文件打开数限制，防止 STAR 报错
+# Step 1-3: 串行处理 (节省系统资源)
+# Step 4-5: 并行/多线程处理 (加速定量步骤)
 # 硬件: AMD EPYC 7R32 (48 Cores) / 250G RAM
 
 # 1. 尝试初始化 conda
@@ -98,7 +99,7 @@ fi
 # ==========================================
 # Step 1-3: 智能匹配 & 预处理 & 比对
 # ==========================================
-echo "=== Step 1-3: 智能匹配模式 ==="
+echo "=== Step 1-3: 智能匹配模式 (串行处理) ==="
 
 shopt -s nullglob
 all_files=(${RAW_DIR}/*.gz)
@@ -167,7 +168,7 @@ if [ ${#all_files[@]} -gt 0 ]; then
             fi
         fi
 
-        # [3/3] STAR (加入 ulimit 修复后应正常运行)
+        # [3/3] STAR
         if [ ! -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
             echo "   -> [STAR] 比对..."
             if [ -d "${STAR_INDEX}" ]; then
@@ -230,5 +231,53 @@ else
     
     echo "⏳ 所有任务已投递，正在计算中 (请勿关闭终端)..."
     wait
-    echo "✅ === 全流程运行结束 ==="
+    echo "✅ [Step 4] TEcount 运行结束！"
 fi
+
+# ==========================================
+# Step 5: featureCounts (新增: 多线程全自动)
+# ==========================================
+echo "=== Step 5: featureCounts 定量 ==="
+
+# 1. 检查软件
+if ! command -v featureCounts &> /dev/null; then
+    echo "❌ [报错] 未找到 featureCounts！"
+    echo "💡 提示: 请运行 conda install -c bioconda subread 安装"
+else
+    # 2. 定义输出文件 (featureCounts通常输出为一个包含所有样本的大矩阵)
+    FC_OUTPUT="${COUNTS_DIR}/all_samples_featureCounts.txt"
+    
+    # 3. 获取所有 BAM 文件列表
+    # (注意：这里使用刚才 Step 4 相同的 bam_files 数组)
+    shopt -s nullglob
+    bam_files=(${ALIGN_DIR}/*.Aligned.sortedByCoord.out.bam)
+    shopt -u nullglob
+    
+    if [ ${#bam_files[@]} -gt 0 ]; then
+        if [ -f "${FC_OUTPUT}" ]; then
+            echo "✅ [跳过] featureCounts 结果已存在: ${FC_OUTPUT}"
+        else
+            echo "🚀 [启动] 正在使用 ${HIGH_THREADS} 线程运行 featureCounts..."
+            echo "   -> 参数: 双端(-p), 反向链(-s 2), 线程(-T ${HIGH_THREADS})"
+            
+            # 4. 运行 featureCounts
+            # -T: 线程数 (使用 HIGH_THREADS 全速运行)
+            # -p: 双端测序
+            # -s 2: 反向链特异性 (对应 TEcount --stranded reverse)
+            # -a: GTF 注释文件
+            # -o: 输出文件路径
+            featureCounts -T ${HIGH_THREADS} \
+                          -p -s 2 \
+                          -a "${GTF_GENE}" \
+                          -o "${FC_OUTPUT}" \
+                          "${bam_files[@]}" \
+                          2>&1 | tee "${FC_OUTPUT}.log"
+            
+            echo "🎉 [Step 5] featureCounts 完成！结果保存在: ${COUNTS_DIR}"
+        fi
+    else
+        echo "⚠️ 未找到 BAM 文件，跳过 Step 5"
+    fi
+fi
+
+echo "✅ === 全流程完美结束 ==="
