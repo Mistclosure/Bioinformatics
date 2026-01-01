@@ -1,8 +1,8 @@
 # ==========================================
-# TE Analysis Pipeline (硬件优化版)
+# TE Analysis Pipeline (修复 ulimit 版)
 # ==========================================
-# 硬件适配: AMD EPYC 7R32 (48 Cores) / 250G RAM
-# 优化策略: 降低线程竞争，大幅提升内存利用率
+# 修复: 增加最大文件打开数限制，防止 STAR 报错
+# 硬件: AMD EPYC 7R32 (48 Cores) / 250G RAM
 
 # 1. 尝试初始化 conda
 if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
@@ -15,27 +15,26 @@ fi
 conda activate qiuzerui
 
 # ======================
-# 🚀 核心配置区域 (已根据 btop 截图调整)
+# 🚀 核心配置区域
 # ======================
 
+# --- [关键修复] 解除 Linux 文件打开数量限制 ---
+# 默认是 1024，STAR 排序需要更多。提权到 65535。
+ulimit -n 65535
+
 # [CPU 策略]
-# 你的 CPU 是 48 核。设置 48 线程能跑满物理核心，效率最高。
-# 之前设置 128 会导致过载，反而变慢。
 HIGH_THREADS=48   
-MID_THREADS=24    # 用于压缩 (pigz)，24 线程足够跑满磁盘写入带宽
-LOW_THREADS=8     # 用于 fastp 这种轻量级任务
+MID_THREADS=24    
+LOW_THREADS=8     
 
 # [内存 策略]
-# fastq-dump 内存: 从 2GB 提升到 16GB (加速解压)
 DUMP_MEM="16384MB"
-# STAR 排序内存: 从 60GB 提升到 100GB (你内存空闲 230G，不用白不用)
 STAR_RAM="100000000000"
 
 # [路径配置]
 BASE_DIR="/home/ubuntu/qiuzerui"
 WORKDIR="${BASE_DIR}/RNA-seq/Y90C_CMV-Cre"
 
-# 定义子目录
 SRA_DIR="${WORKDIR}/sra"
 RAW_DIR="${WORKDIR}/rawdata"
 TRIM_DIR="${WORKDIR}/trimmed_fastq"
@@ -43,22 +42,19 @@ CLEAN_DIR="${WORKDIR}/clean_non_rRNA"
 ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
 
-# 参考基因组路径
 ANNO_DIR="${BASE_DIR}/RNA-seq/annotations/annotationMv38"
 STAR_INDEX="${BASE_DIR}/RNA-seq/indexes/star_index_m39"
 GTF_GENE="${ANNO_DIR}/gencode.vM38.annotation_PRI.gtf"
 GTF_TE="${ANNO_DIR}/m39_TE.gtf"
 RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
 
-# 尝试进入目录
+# 初始化目录
 echo ">>> 正在初始化目录..."
 if cd "${WORKDIR}"; then
     echo "✅ 已进入: $(pwd)"
 else
     echo "❌ [报错] 无法进入目录 $WORKDIR，请检查！"
 fi
-
-# 创建文件夹
 mkdir -p ${RAW_DIR} ${TRIM_DIR} ${CLEAN_DIR} ${ALIGN_DIR} ${COUNTS_DIR}
 
 
@@ -76,16 +72,13 @@ if [ ${#sra_files[@]} -gt 0 ]; then
         filename=$(basename ${sra_file})
         sample_name=${filename%.sra}
         
-        # 检查是否已存在
         if ls "${RAW_DIR}/${sample_name}"_*.gz &> /dev/null; then
             continue
         fi
 
         echo "正在处理: ${sample_name}"
         if command -v fasterq-dump &> /dev/null; then
-            # 优化: 使用更大的内存 (DUMP_MEM)
             fasterq-dump --split-3 -e ${MID_THREADS} -m ${DUMP_MEM} --outdir ${RAW_DIR} --progress ${sra_file}
-            
             if command -v pigz &> /dev/null; then
                 pigz -p ${MID_THREADS} ${RAW_DIR}/${sample_name}_1.fastq
                 pigz -p ${MID_THREADS} ${RAW_DIR}/${sample_name}_2.fastq
@@ -105,10 +98,9 @@ fi
 # ==========================================
 # Step 1-3: 智能匹配 & 预处理 & 比对
 # ==========================================
-echo "=== Step 1-3: 智能匹配模式 (支持 _1/_R1 和 .fq/.fastq) ==="
+echo "=== Step 1-3: 智能匹配模式 ==="
 
 shopt -s nullglob
-# 扫描所有 .gz 文件
 all_files=(${RAW_DIR}/*.gz)
 shopt -u nullglob
 
@@ -147,7 +139,7 @@ if [ ${#all_files[@]} -gt 0 ]; then
 
         echo ">>> 正在处理: ${sample_name} <<<"
 
-        # [1/3] Fastp 质控
+        # [1/3] Fastp
         if [ ! -f "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" ]; then
             echo "   -> [Fastp] 质控..."
             fastp -i "${r1_file}" -I "${r2_file}" \
@@ -158,7 +150,7 @@ if [ ${#all_files[@]} -gt 0 ]; then
                   --thread ${LOW_THREADS} --detect_adapter_for_pe --length_required 25 2> /dev/null
         fi
 
-        # [2/3] Bowtie2 去 rRNA
+        # [2/3] Bowtie2
         if [ ! -f "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" ]; then
             echo "   -> [Bowtie2] 去除 rRNA..."
             if ls "${RRNA_INDEX}"* &> /dev/null; then
@@ -175,11 +167,10 @@ if [ ${#all_files[@]} -gt 0 ]; then
             fi
         fi
 
-        # [3/3] STAR 比对
+        # [3/3] STAR (加入 ulimit 修复后应正常运行)
         if [ ! -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
             echo "   -> [STAR] 比对..."
             if [ -d "${STAR_INDEX}" ]; then
-                # 优化: 使用更大的 limitBAMsortRAM
                 STAR --runThreadN ${HIGH_THREADS} --genomeDir "${STAR_INDEX}" \
                      --readFilesIn "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" \
                      --readFilesCommand zcat \
@@ -226,7 +217,6 @@ else
 
         echo "🚀 [后台运行] TEcount: ${sample_name}"
 
-        # 后台执行
         (
             TEcount --sortByPos --format BAM --mode multi \
                     --GTF "${GTF_GENE}" \
