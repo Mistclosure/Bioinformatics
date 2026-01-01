@@ -34,7 +34,7 @@ STAR_RAM="100000000000"
 
 # [路径配置]
 BASE_DIR="/home/ubuntu/qiuzerui"
-WORKDIR="${BASE_DIR}/RNA-seq/Y90C_CMV-Cre"
+WORKDIR="${BASE_DIR}/RNA-seq/Phf20_GSE82115"
 
 SRA_DIR="${WORKDIR}/sra"
 RAW_DIR="${WORKDIR}/rawdata"
