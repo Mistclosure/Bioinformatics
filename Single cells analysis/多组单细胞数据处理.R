@@ -101,11 +101,32 @@ if (length(sc_list) > 0) {
 }
 
 # ------------------------------------------------------------------------------
-# 3. 统一质控 (QC)
+# 3. 统一质控 (QC) 与 移除核糖体基因 (新增)
 # ------------------------------------------------------------------------------
-print("🚀 步骤2/6: 正在进行质控过滤...")
+print("🚀 步骤2/6: 正在进行质控过滤并移除核糖体基因...")
+
+# A. 细胞水平过滤 (保持原样)
 sc_combined <- subset(sc_combined, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 15)
 
+# B. 计算核糖体基因占比 (可选，仅为了查看过滤前的情况)
+# 小鼠核糖体基因通常以 Rp[sl] 开头
+sc_combined[["percent.rb"]] <- PercentageFeatureSet(sc_combined, pattern = "^Rp[sl]")
+
+# C. 基因水平过滤：彻底从矩阵中移除核糖体基因
+# 匹配所有以 Rps 或 Rpl 开头的基因 (不区分大小写以防万一)
+ribo_genes <- grep("^Rp[sl]", rownames(sc_combined), value = TRUE, ignore.case = TRUE)
+
+# 打印移除信息，方便检查
+print(paste("📊 识别到核糖体基因数量:", length(ribo_genes)))
+print(paste("🧬 过滤前总基因数:", nrow(sc_combined)))
+
+# 提取非核糖体基因的名称
+non_ribo_genes <- rownames(sc_combined)[!rownames(sc_combined) %in% ribo_genes]
+
+# 执行过滤：仅保留非核糖体基因
+sc_combined <- subset(sc_combined, features = non_ribo_genes)
+
+print(paste("✅ 过滤后剩余基因数:", nrow(sc_combined)))
 # ------------------------------------------------------------------------------
 # 4. 按组织拆分并独立分析 (含 scDblFinder 去双胞)
 # ------------------------------------------------------------------------------
