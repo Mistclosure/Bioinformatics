@@ -232,14 +232,14 @@ sc_by_tissue_annotated <- lapply(names(sc_by_tissue), function(nm) {
   current_obj <- sc_by_tissue[[nm]]
   print(paste(">>> 正在为", nm, "准备 ScType 注释..."))
   
-  # 1. 确定组织数据库策略
+  # 1. 确定组织数据库策略##########针对不同组织修改！！！！！！！！！######
   if (nm == "Aorta") {
-    target_tissues <- c("Immune system", "Heart", "Muscle")
-    print("   -> 策略: Aorta (Immune + Heart + Muscle)")
+    target_tissues <- c("Immune system")
+    print("   -> 策略: Aorta (Immune)")
     
   } else if (nm == "BoneMarrow") {
-    target_tissues <- c("Immune system", "Bone marrow")
-    print("   -> 策略: BoneMarrow (Immune + Bone marrow)")
+    target_tissues <- c("Immune system")
+    print("   -> 策略: BoneMarrow (Immune )")
     
   } else {
     # PBMC 处理
