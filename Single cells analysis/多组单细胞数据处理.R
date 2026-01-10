@@ -279,6 +279,35 @@ sc_by_tissue_annotated <- lapply(names(sc_by_tissue), function(nm) {
 
 names(sc_by_tissue_annotated) <- names(sc_by_tissue)
 sc_by_tissue <- sc_by_tissue_annotated
+# ==============================================================================
+# 5.5 特殊处理：合并 PBMC 中的单核细胞亚群 (新增)
+# ==============================================================================
+if ("PBMC" %in% names(sc_by_tissue)) {
+  print("🚀 正在执行 PBMC 特殊处理：合并 Monocytes 亚群...")
+  
+  # 提取 PBMC 对象
+  pbmc_obj <- sc_by_tissue[["PBMC"]]
+  
+  # 记录合并前的类型
+  old_types <- unique(pbmc_obj$cell_type)
+  print(paste("🔍 合并前 PBMC 包含类型:", paste(old_types, collapse = ", ")))
+  
+  # 使用 ifelse 或 recode 进行合并
+  # 注意：ScType 数据库中的名称通常为 "Classical Monocytes" 和 "Non-classical monocytes"
+  pbmc_obj$cell_type <- ifelse(
+    pbmc_obj$cell_type %in% c("Classical Monocytes", "Non-classical monocytes"), 
+    "Monocytes", 
+    pbmc_obj$cell_type
+  )
+  
+  # 重新转换为 factor 以便后续绘图颜色锁定
+  pbmc_obj$cell_type <- factor(pbmc_obj$cell_type)
+  
+  # 放回列表
+  sc_by_tissue[["PBMC"]] <- pbmc_obj
+  
+  print(paste("✅ PBMC 单核细胞合并完成。当前类型:", paste(unique(pbmc_obj$cell_type), collapse = ", ")))
+}
 
 # ------------------------------------------------------------------------------
 # 6. 绘图 (最终修正版：单图例 + 颜色锁定)
