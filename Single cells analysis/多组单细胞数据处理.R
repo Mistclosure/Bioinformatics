@@ -280,34 +280,49 @@ sc_by_tissue_annotated <- lapply(names(sc_by_tissue), function(nm) {
 names(sc_by_tissue_annotated) <- names(sc_by_tissue)
 sc_by_tissue <- sc_by_tissue_annotated
 # ==============================================================================
-# 5.5 特殊处理：合并 PBMC 中的单核细胞亚群 (新增)
+# 5.5 (修正版) 通用处理：合并所有组织中的单核细胞亚群
 # ==============================================================================
-if ("PBMC" %in% names(sc_by_tissue)) {
-  print("🚀 正在执行 PBMC 特殊处理：合并 Monocytes 亚群...")
+print("🚀 步骤5.5: 正在合并所有组织中的 Monocytes 亚群...")
+
+# 定义需要合并的亚群名称 (ScType 默认输出名称)
+target_subtypes <- c("Classical Monocytes", "Non-classical monocytes")
+
+# 循环遍历每一个组织 (PBMC, Aorta, BoneMarrow)
+for (tissue_name in names(sc_by_tissue)) {
   
-  # 提取 PBMC 对象
-  pbmc_obj <- sc_by_tissue[["PBMC"]]
+  print(paste("   -> 正在处理组织:", tissue_name))
+  current_obj <- sc_by_tissue[[tissue_name]]
   
-  # 记录合并前的类型
-  old_types <- unique(pbmc_obj$cell_type)
-  print(paste("🔍 合并前 PBMC 包含类型:", paste(old_types, collapse = ", ")))
+  # 1. 检查是否存在需要合并的类型
+  # (为了打印日志让用户知道发生了什么)
+  found_types <- intersect(unique(current_obj$cell_type), target_subtypes)
   
-  # 使用 ifelse 或 recode 进行合并
-  # 注意：ScType 数据库中的名称通常为 "Classical Monocytes" 和 "Non-classical monocytes"
-  pbmc_obj$cell_type <- ifelse(
-    pbmc_obj$cell_type %in% c("Classical Monocytes", "Non-classical monocytes"), 
-    "Monocytes", 
-    pbmc_obj$cell_type
-  )
-  
-  # 重新转换为 factor 以便后续绘图颜色锁定
-  pbmc_obj$cell_type <- factor(pbmc_obj$cell_type)
-  
-  # 放回列表
-  sc_by_tissue[["PBMC"]] <- pbmc_obj
-  
-  print(paste("✅ PBMC 单核细胞合并完成。当前类型:", paste(unique(pbmc_obj$cell_type), collapse = ", ")))
+  if (length(found_types) > 0) {
+    print(paste("      检测到:", paste(found_types, collapse = ", "), "-> 合并为 Monocytes"))
+    
+    # 2. 执行合并逻辑
+    # 将 cell_type 中属于 target_subtypes 的全部重命名为 "Monocytes"
+    # 不属于的保持原样
+    new_labels <- ifelse(
+      current_obj$cell_type %in% target_subtypes,
+      "Monocytes",
+      as.character(current_obj$cell_type)
+    )
+    
+    current_obj$cell_type <- new_labels
+    
+    # 3. 重置因子水平 (去除已不存在的 Classical/Non-classical levels)
+    current_obj$cell_type <- factor(current_obj$cell_type)
+    
+    # 4. 更新回列表
+    sc_by_tissue[[tissue_name]] <- current_obj
+    
+  } else {
+    print("      未检测到细分单核亚群，保持原样。")
+  }
 }
+
+print("✅ 所有组织的单核细胞合并完成！")
 
 # ------------------------------------------------------------------------------
 # 6. 绘图 (最终修正版：单图例 + 颜色锁定)
