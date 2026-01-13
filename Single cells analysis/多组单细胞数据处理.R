@@ -594,11 +594,11 @@ myeloid_combined <- RunPCA(myeloid_combined, verbose = FALSE)
 myeloid_combined <- RunUMAP(myeloid_combined, dims = 1:25) 
 
 # ------------------------------------------------------------------------------
-# 8.5 (优化版) 绘图：三张图独立输出
+# 8.5 (进阶版) 绘图：总图 + 分组独立视图 + 基因表达
 # ------------------------------------------------------------------------------
-print("  -> 正在绘制并保存独立图片...")
+print("  -> 正在绘制并保存独立图片 (Total / Cold / RT)...")
 
-# 定义颜色方案 (保持一致性)
+# 1. 定义颜色方案 (保持一致性)
 color_map <- c(
   "Monocytes (RT)"      = "#D3D3D3",  # LightGrey
   "Monocytes (Cold)"    = "#808080",  # DarkGrey
@@ -608,44 +608,96 @@ color_map <- c(
   "Macrophages (Cold)"  = "#1F78B4"   # DarkBlue
 )
 
-# --- 图 1: 总体分布图 (Lineage Tracing) ---
-p_trace <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.2) +
-  scale_color_manual(values = color_map) +
-  ggtitle("Myeloid Lineage Tracing (Cold vs RT)") +
-  theme_minimal() +
+# 2. 设定统一的主题
+my_theme <- theme_minimal() +
   theme(
     plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
     legend.position = "right",
-    legend.text = element_text(size = 10)
+    legend.text = element_text(size = 10),
+    axis.title = element_text(size = 12)
   )
 
-ggsave(filename = "1_Lineage_Tracing_Map.png", plot = p_trace, width = 10, height = 8, path = data_dir)
-print("  ✅ [1/3] 总体分布图已保存: 1_Lineage_Tracing_Map.png")
+# --- 图 1: 总图 (Total Map) ---
+p_total <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.2) +
+  scale_color_manual(values = color_map) +
+  ggtitle("Total Lineage Map (Cold + RT)") +
+  my_theme
 
-# --- 图 2: Cold_4C 下的 Fkbp5 表达 ---
+ggsave(filename = "1_Map_Total.png", plot = p_total, width = 10, height = 8, path = data_dir)
+print("  ✅ [1/5] 总图已保存: 1_Map_Total.png")
+
+# --- 图 2: Cold_4C 分图 (Map Cold Only) ---
 # 提取 Cold 细胞
 obj_cold <- subset(myeloid_combined, subset = Group == "Cold_4C")
 
-p_cold_gene <- FeaturePlot(obj_cold, features = target_gene, order = TRUE, pt.size = 1.2) + 
-  scale_color_viridis_c(option = "plasma") + # 使用对比度更高的 plasma 色盘
-  ggtitle(paste0(target_gene, " Expression (Cold_4C)")) +
-  theme_minimal() +
-  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+p_cold_map <- DimPlot(obj_cold, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.2) +
+  scale_color_manual(values = color_map, drop = FALSE) + # drop=FALSE 保证图例不丢失
+  ggtitle("Lineage Map (Cold_4C Only)") +
+  my_theme
 
-ggsave(filename = "2_Fkbp5_Expression_Cold.png", plot = p_cold_gene, width = 8, height = 7, path = data_dir)
-print("  ✅ [2/3] 寒冷组基因图已保存: 2_Fkbp5_Expression_Cold.png")
+ggsave(filename = "2_Map_Cold.png", plot = p_cold_map, width = 10, height = 8, path = data_dir)
+print("  ✅ [2/5] 寒冷组分布图已保存: 2_Map_Cold.png")
 
-# --- 图 3: RT_25C 下的 Fkbp5 表达 ---
+# --- 图 3: RT_25C 分图 (Map RT Only) ---
 # 提取 RT 细胞
 obj_rt <- subset(myeloid_combined, subset = Group == "RT_25C")
 
+p_rt_map <- DimPlot(obj_rt, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.2) +
+  scale_color_manual(values = color_map, drop = FALSE) +
+  ggtitle("Lineage Map (RT_25C Only)") +
+  my_theme
+
+ggsave(filename = "3_Map_RT.png", plot = p_rt_map, width = 10, height = 8, path = data_dir)
+print("  ✅ [3/5] 常温组分布图已保存: 3_Map_RT.png")
+
+# --- 图 4 & 5: 基因表达图 (Gene Expression) ---
+# 顺便把 Fkbp5 的表达图也分开保存，方便对应查看
+
+# Cold 表达
+p_cold_gene <- FeaturePlot(obj_cold, features = target_gene, order = TRUE, pt.size = 1.2) + 
+  scale_color_viridis_c(option = "plasma") + 
+  ggtitle(paste0(target_gene, " Expression (Cold_4C)")) +
+  my_theme
+
+ggsave(filename = "4_Gene_Cold.png", plot = p_cold_gene, width = 9, height = 8, path = data_dir)
+print("  ✅ [4/5] 寒冷组基因表达图已保存: 4_Gene_Cold.png")
+
+# RT 表达
 p_rt_gene <- FeaturePlot(obj_rt, features = target_gene, order = TRUE, pt.size = 1.2) + 
   scale_color_viridis_c(option = "plasma") + 
   ggtitle(paste0(target_gene, " Expression (RT_25C)")) +
-  theme_minimal() +
-  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+  my_theme
 
-ggsave(filename = "3_Fkbp5_Expression_RT.png", plot = p_rt_gene, width = 8, height = 7, path = data_dir)
-print("  ✅ [3/3] 常温组基因图已保存: 3_Fkbp5_Expression_RT.png")
+ggsave(filename = "5_Gene_RT.png", plot = p_rt_gene, width = 9, height = 8, path = data_dir)
+print("  ✅ [5/5] 常温组基因表达图已保存: 5_Gene_RT.png")
 
-print("🎉 所有图片绘制完成！")
+print("🎉 所有 5 张图片绘制完成！")
+
+# ------------------------------------------------------------------------------
+# 8.6 计算相关性 (混合版)
+# ------------------------------------------------------------------------------
+print("  -> 正在计算相关性矩阵...")
+avg_data <- AverageExpression(myeloid_combined, group.by = "Myeloid_Subtype", assays = "RNA")
+
+if (is.list(avg_data)) avg_expr_mat <- as.matrix(avg_data$RNA) else avg_expr_mat <- as.matrix(avg_data)
+
+var_genes <- VariableFeatures(myeloid_combined)
+valid_genes <- intersect(var_genes, rownames(avg_expr_mat))
+if (length(valid_genes) < 50) valid_genes <- rownames(avg_expr_mat)
+
+# 计算 Log1p 后的相关性
+cor_mat <- cor(as.matrix(log1p(avg_expr_mat[valid_genes, ])), method = "pearson")
+
+print("📈 相关性矩阵 (部分展示):")
+print(round(cor_mat, 3))
+
+# 绘制热图
+library(pheatmap)
+filename_heatmap <- "Fkbp5_Similarity_Mixed_Heatmap.png"
+png(file.path(data_dir, filename_heatmap), width = 800, height = 700, res = 120)
+pheatmap(cor_mat, display_numbers = TRUE, cluster_rows = FALSE, cluster_cols = FALSE,
+         number_color = "black", fontsize_number = 12,
+         main = "Similarity (Cold vs RT)",
+         color = colorRampPalette(c("white", "firebrick3"))(100)) # 只展示正相关部分
+dev.off()
+print("🎉 混合分析完成！")
