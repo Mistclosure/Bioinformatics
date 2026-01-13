@@ -488,149 +488,164 @@ for (tissue_name in names(sc_by_tissue)) {
 
 print("🎉 分析完成！请查看 DE_Results 文件夹内的分类结果。")
 # ==============================================================================
-# 8. (调试修正版) 深度分析：Fkbp5+ 单核细胞溯源 (仅限 Cold_4C)
+# 8. (混合分析版) 深度分析：Fkbp5+ 单核细胞溯源 (Cold_4C vs RT_25C)
 # ==============================================================================
-print("🚀 步骤8/8: 正在进行 Fkbp5+ 单核细胞的谱系定位分析 (仅限 Cold_4C)...")
+print("🚀 步骤8/8: 正在进行 Fkbp5+ 单核细胞的谱系定位分析 (Cold + RT 混合)...")
 
-# 8.1 提取细胞 (同前)
+# ------------------------------------------------------------------------------
+# 8.1 提取细胞 (保留 Cold_4C 和 RT_25C)
+# ------------------------------------------------------------------------------
 myeloid_list <- list()
+
 for (tissue in names(sc_by_tissue)) {
   obj <- sc_by_tissue[[tissue]]
+  
+  # 1. 查找髓系细胞类型
   target_cells <- grep("Monocytes|Macrophage", obj$cell_type, value = TRUE, ignore.case = TRUE)
+  
   if (length(target_cells) > 0) {
-    sub_obj <- subset(obj, subset = cell_type %in% target_cells & Group == "Cold_4C")
+    # 2. 提取髓系细胞
+    # 【关键修改】条件改为: 属于髓系 且 (属于 Cold 组 或 RT 组)
+    sub_obj <- subset(obj, subset = cell_type %in% target_cells & Group %in% c("Cold_4C", "RT_25C"))
+    
     if (ncol(sub_obj) > 0) {
-      print(paste("  -> 从", tissue, "提取 Cold_4C 髓系细胞:", ncol(sub_obj), "个"))
+      print(paste("  -> 从", tissue, "提取 Cold+RT 髓系细胞:", ncol(sub_obj), "个"))
       sub_obj$Original_Tissue <- tissue
       myeloid_list[[tissue]] <- sub_obj
     }
   }
 }
 
-if (length(myeloid_list) == 0) stop("❌ 未找到 Cold_4C 髓系细胞")
+if (length(myeloid_list) == 0) stop("❌ 未找到符合条件的髓系细胞！")
 
 # 合并对象
 myeloid_combined <- merge(myeloid_list[[1]], y = myeloid_list[2:length(myeloid_list)])
 DefaultAssay(myeloid_combined) <- "RNA"
 
 # ------------------------------------------------------------------------------
-# 【关键修复 1】合并层 (JoinLayers) - 针对 Seurat V5 必须执行
+# 8.2 数据层合并与 Fkbp5 提取 (Seurat V5 必需)
 # ------------------------------------------------------------------------------
 print("  -> [V5 修复] 正在合并不同组织的矩阵层 (JoinLayers)...")
 myeloid_combined <- JoinLayers(myeloid_combined) 
 
-# ------------------------------------------------------------------------------
-# 【关键修复 2】更加稳健的 Fkbp5 提取方式
-# ------------------------------------------------------------------------------
+# 提取 Fkbp5 表达量
 if (!"Fkbp5" %in% rownames(myeloid_combined)) {
-  # 尝试模糊匹配，防止大小写问题 (小鼠应该是 Fkbp5)
   real_name <- grep("Fkbp5", rownames(myeloid_combined), ignore.case = TRUE, value = TRUE)
-  if(length(real_name) > 0) {
-    target_gene <- real_name[1]
-  } else {
-    stop("❌ 矩阵中完全找不到 Fkbp5 基因，请检查过滤步骤是否误删。")
-  }
+  if(length(real_name) > 0) target_gene <- real_name[1] else stop("❌ 未找到 Fkbp5 基因")
 } else {
   target_gene <- "Fkbp5"
 }
 
-# 提取表达量 (使用 JoinLayers 后的单矩阵提取)
 fkbp5_counts <- GetAssayData(myeloid_combined, assay = "RNA", layer = "counts")[target_gene, ]
 
-# 8.2 定义亚群
-new_labels <- ifelse(grepl("Macrophage", myeloid_combined$cell_type, ignore.case = TRUE), 
-                     "Macrophages (Cold)", 
-                     ifelse(fkbp5_counts > 0, "Fkbp5+ Mono (Cold)", "Monocytes (Cold)"))
+# ------------------------------------------------------------------------------
+# 8.3 定义详细亚群 (6种可能的组合)
+# ------------------------------------------------------------------------------
+# 逻辑：先判断是单核还是巨噬 -> 再判断是 Cold 还是 RT -> 再判断(如果是单核)是否 Fkbp5+
 
-myeloid_combined$Myeloid_Subtype <- factor(new_labels, levels = c("Monocytes (Cold)", "Fkbp5+ Mono (Cold)", "Macrophages (Cold)"))
-print("✅ 分组定义完成。")
+cell_types <- myeloid_combined$cell_type
+groups <- myeloid_combined$Group
+new_labels <- vector("character", length = ncol(myeloid_combined))
 
-# 8.3 重新处理
+for (i in 1:ncol(myeloid_combined)) {
+  ctype <- cell_types[i]
+  grp   <- groups[i]
+  expr  <- fkbp5_counts[i]
+  
+  # 简化组名后缀
+  suffix <- ifelse(grp == "Cold_4C", "(Cold)", "(RT)")
+  
+  if (grepl("Macrophage", ctype, ignore.case = TRUE)) {
+    # 巨噬细胞
+    new_labels[i] <- paste("Macrophages", suffix)
+  } else {
+    # 单核细胞
+    if (expr > 0) {
+      new_labels[i] <- paste("Fkbp5+ Mono", suffix)
+    } else {
+      new_labels[i] <- paste("Monocytes", suffix)
+    }
+  }
+}
+
+# 设置因子水平，保证图例顺序清晰
+# 顺序：RT单核 -> Cold单核 -> RT Fkbp5+ -> Cold Fkbp5+ (红) -> RT 巨噬 -> Cold 巨噬
+my_levels <- c("Monocytes (RT)", "Monocytes (Cold)", 
+               "Fkbp5+ Mono (RT)", "Fkbp5+ Mono (Cold)", 
+               "Macrophages (RT)", "Macrophages (Cold)")
+
+# 只保留实际存在的 level
+existing_levels <- intersect(my_levels, unique(new_labels))
+myeloid_combined$Myeloid_Subtype <- factor(new_labels, levels = existing_levels)
+
+print("✅ 分组定义完成。各组数量：")
+print(table(myeloid_combined$Myeloid_Subtype))
+
+# ------------------------------------------------------------------------------
+# 8.4 重新处理 (标准化 -> 降维)
+# ------------------------------------------------------------------------------
 print("  -> 正在进行标准化和降维...")
 myeloid_combined <- NormalizeData(myeloid_combined)
 myeloid_combined <- FindVariableFeatures(myeloid_combined, nfeatures = 2000)
 myeloid_combined <- ScaleData(myeloid_combined)
 myeloid_combined <- RunPCA(myeloid_combined, verbose = FALSE)
-myeloid_combined <- RunUMAP(myeloid_combined, dims = 1:20)
+
+# 此时可以稍微增加 dims，因为包含了更多异质性
+myeloid_combined <- RunUMAP(myeloid_combined, dims = 1:25) 
 
 # ------------------------------------------------------------------------------
-# 8.4 绘图：直观展示位置关系
+# 8.5 (优化版) 绘图：三张图独立输出
 # ------------------------------------------------------------------------------
-# 图1：UMAP 分布图
-p_trace <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.5) +
-  scale_color_manual(values = c("Monocytes (Cold)" = "lightgrey", 
-                                "Fkbp5+ Mono (Cold)" = "#E41A1C",  # 红色
-                                "Macrophages (Cold)" = "#377EB8")) + # 蓝色
-  ggtitle("Fkbp5+ Cluster Tracing (Cold Only)") +
-  theme_minimal()
+print("  -> 正在绘制并保存独立图片...")
 
-# 图2：Fkbp5 基因表达分布 (验证用)
-p_gene <- FeaturePlot(myeloid_combined, features = "Fkbp5", order = TRUE) + 
-  scale_color_viridis_c() + ggtitle("Fkbp5 Expression")
+# 定义颜色方案 (保持一致性)
+color_map <- c(
+  "Monocytes (RT)"      = "#D3D3D3",  # LightGrey
+  "Monocytes (Cold)"    = "#808080",  # DarkGrey
+  "Fkbp5+ Mono (RT)"    = "#FBB4AE",  # Pink
+  "Fkbp5+ Mono (Cold)"  = "#E41A1C",  # Red
+  "Macrophages (RT)"    = "#A6CEE3",  # LightBlue
+  "Macrophages (Cold)"  = "#1F78B4"   # DarkBlue
+)
 
-# 保存图片
-filename_umap <- "Fkbp5_Tracing_Cold_Only_UMAP.png"
-ggsave(filename = filename_umap, plot = p_trace + p_gene, width = 14, height = 6, path = data_dir)
-print(paste("  ✅ 溯源图已保存:", filename_umap))
+# --- 图 1: 总体分布图 (Lineage Tracing) ---
+p_trace <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.2) +
+  scale_color_manual(values = color_map) +
+  ggtitle("Myeloid Lineage Tracing (Cold vs RT)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.position = "right",
+    legend.text = element_text(size = 10)
+  )
 
-# ------------------------------------------------------------------------------
-# 8.5 (修正版) 计算转录组相关性 (解决 cor() 矩阵匹配报错)
-# ------------------------------------------------------------------------------
-print("  -> 正在计算转录组相关性...")
+ggsave(filename = "1_Lineage_Tracing_Map.png", plot = p_trace, width = 10, height = 8, path = data_dir)
+print("  ✅ [1/3] 总体分布图已保存: 1_Lineage_Tracing_Map.png")
 
-# 1. 计算平均表达谱
-# assays = "RNA" 确保只提取 RNA 层数据
-avg_data <- AverageExpression(myeloid_combined, group.by = "Myeloid_Subtype", assays = "RNA")
+# --- 图 2: Cold_4C 下的 Fkbp5 表达 ---
+# 提取 Cold 细胞
+obj_cold <- subset(myeloid_combined, subset = Group == "Cold_4C")
 
-# 2. 【关键修复】显式转换为矩阵格式并处理空值
-# Seurat V5 的结果可能在 list 的第一个元素中
-if (is.list(avg_data)) {
-  avg_expr_mat <- as.matrix(avg_data$RNA) 
-} else {
-  avg_expr_mat <- as.matrix(avg_data)
-}
+p_cold_gene <- FeaturePlot(obj_cold, features = target_gene, order = TRUE, pt.size = 1.2) + 
+  scale_color_viridis_c(option = "plasma") + # 使用对比度更高的 plasma 色盘
+  ggtitle(paste0(target_gene, " Expression (Cold_4C)")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
 
-# 3. 筛选高变基因进行计算
-var_genes <- VariableFeatures(myeloid_combined)
-valid_genes <- intersect(var_genes, rownames(avg_expr_mat))
+ggsave(filename = "2_Fkbp5_Expression_Cold.png", plot = p_cold_gene, width = 8, height = 7, path = data_dir)
+print("  ✅ [2/3] 寒冷组基因图已保存: 2_Fkbp5_Expression_Cold.png")
 
-# 检查是否有足够的基因参与计算
-if (length(valid_genes) < 50) {
-  print("  ⚠️ 高变基因匹配过少，尝试使用全部基因进行相关性计算...")
-  valid_genes <- rownames(avg_expr_mat)
-}
+# --- 图 3: RT_25C 下的 Fkbp5 表达 ---
+# 提取 RT 细胞
+obj_rt <- subset(myeloid_combined, subset = Group == "RT_25C")
 
-print(paste("  📊 参与相关性计算的基因数量:", length(valid_genes)))
+p_rt_gene <- FeaturePlot(obj_rt, features = target_gene, order = TRUE, pt.size = 1.2) + 
+  scale_color_viridis_c(option = "plasma") + 
+  ggtitle(paste0(target_gene, " Expression (RT_25C)")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
 
-# 4. 【核心修复】使用 as.matrix() 并进行 log 转换
-# 对数据进行对数化，减少极值对相关性的干扰
-target_data_for_cor <- as.matrix(log1p(avg_expr_mat[valid_genes, ]))
+ggsave(filename = "3_Fkbp5_Expression_RT.png", plot = p_rt_gene, width = 8, height = 7, path = data_dir)
+print("  ✅ [3/3] 常温组基因图已保存: 3_Fkbp5_Expression_RT.png")
 
-# 5. 计算 Pearson 相关性矩阵
-# 这里转置一下，确保是对“列（细胞类型）”之间计算相关性
-cor_mat <- cor(target_data_for_cor, method = "pearson")
-
-# 6. 打印结果到控制台，方便直接查看数值
-print("📈 相关性矩阵结果 (Correlation Matrix):")
-print(round(cor_mat, 4))
-
-# 7. 绘制并保存热图
-library(pheatmap)
-filename_heatmap <- "Fkbp5_Similarity_Cold_Only_Heatmap.png"
-
-tryCatch({
-  png(file.path(data_dir, filename_heatmap), width = 700, height = 600, res = 120)
-  pheatmap(cor_mat, 
-           display_numbers = TRUE, 
-           number_color = "black",
-           cluster_rows = FALSE, 
-           cluster_cols = FALSE,
-           color = colorRampPalette(c("#4575b4", "white", "#d73027"))(100),
-           main = "Lineage Similarity (Pearson Cor)",
-           fontsize = 12,
-           fontsize_number = 14)
-  dev.off()
-  print(paste("  ✅ 相关性热图已保存:", filename_heatmap))
-}, error = function(e) {
-  print(paste("  ❌ 热图保存失败:", e$message))
-})
+print("🎉 所有图片绘制完成！")
