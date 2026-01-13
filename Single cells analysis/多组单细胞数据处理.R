@@ -280,49 +280,34 @@ sc_by_tissue_annotated <- lapply(names(sc_by_tissue), function(nm) {
 names(sc_by_tissue_annotated) <- names(sc_by_tissue)
 sc_by_tissue <- sc_by_tissue_annotated
 # ==============================================================================
-# 5.5 (修正版) 通用处理：合并所有组织中的单核细胞亚群
+# 5.5 特殊处理：合并 PBMC 中的单核细胞亚群 (新增)
 # ==============================================================================
-print("🚀 步骤5.5: 正在合并所有组织中的 Monocytes 亚群...")
-
-# 定义需要合并的亚群名称 (ScType 默认输出名称)
-target_subtypes <- c("Classical Monocytes", "Non-classical monocytes")
-
-# 循环遍历每一个组织 (PBMC, Aorta, BoneMarrow)
-for (tissue_name in names(sc_by_tissue)) {
+if ("PBMC" %in% names(sc_by_tissue)) {
+  print("🚀 正在执行 PBMC 特殊处理：合并 Monocytes 亚群...")
   
-  print(paste("   -> 正在处理组织:", tissue_name))
-  current_obj <- sc_by_tissue[[tissue_name]]
+  # 提取 PBMC 对象
+  pbmc_obj <- sc_by_tissue[["PBMC"]]
   
-  # 1. 检查是否存在需要合并的类型
-  # (为了打印日志让用户知道发生了什么)
-  found_types <- intersect(unique(current_obj$cell_type), target_subtypes)
+  # 记录合并前的类型
+  old_types <- unique(pbmc_obj$cell_type)
+  print(paste("🔍 合并前 PBMC 包含类型:", paste(old_types, collapse = ", ")))
   
-  if (length(found_types) > 0) {
-    print(paste("      检测到:", paste(found_types, collapse = ", "), "-> 合并为 Monocytes"))
-    
-    # 2. 执行合并逻辑
-    # 将 cell_type 中属于 target_subtypes 的全部重命名为 "Monocytes"
-    # 不属于的保持原样
-    new_labels <- ifelse(
-      current_obj$cell_type %in% target_subtypes,
-      "Monocytes",
-      as.character(current_obj$cell_type)
-    )
-    
-    current_obj$cell_type <- new_labels
-    
-    # 3. 重置因子水平 (去除已不存在的 Classical/Non-classical levels)
-    current_obj$cell_type <- factor(current_obj$cell_type)
-    
-    # 4. 更新回列表
-    sc_by_tissue[[tissue_name]] <- current_obj
-    
-  } else {
-    print("      未检测到细分单核亚群，保持原样。")
-  }
+  # 使用 ifelse 或 recode 进行合并
+  # 注意：ScType 数据库中的名称通常为 "Classical Monocytes" 和 "Non-classical monocytes"
+  pbmc_obj$cell_type <- ifelse(
+    pbmc_obj$cell_type %in% c("Classical Monocytes", "Non-classical monocytes"), 
+    "Monocytes", 
+    pbmc_obj$cell_type
+  )
+  
+  # 重新转换为 factor 以便后续绘图颜色锁定
+  pbmc_obj$cell_type <- factor(pbmc_obj$cell_type)
+  
+  # 放回列表
+  sc_by_tissue[["PBMC"]] <- pbmc_obj
+  
+  print(paste("✅ PBMC 单核细胞合并完成。当前类型:", paste(unique(pbmc_obj$cell_type), collapse = ", ")))
 }
-
-print("✅ 所有组织的单核细胞合并完成！")
 
 # ------------------------------------------------------------------------------
 # 6. 绘图 (最终修正版：单图例 + 颜色锁定)
@@ -503,145 +488,149 @@ for (tissue_name in names(sc_by_tissue)) {
 
 print("🎉 分析完成！请查看 DE_Results 文件夹内的分类结果。")
 # ==============================================================================
-# 8. 深度分析：Fkbp5+ 单核细胞溯源 (Monocyte vs Macrophage 相似性分析)
+# 8. (调试修正版) 深度分析：Fkbp5+ 单核细胞溯源 (仅限 Cold_4C)
 # ==============================================================================
-print("🚀 步骤8/8: 正在进行 Fkbp5+ 单核细胞的谱系定位分析...")
+print("🚀 步骤8/8: 正在进行 Fkbp5+ 单核细胞的谱系定位分析 (仅限 Cold_4C)...")
 
-# ------------------------------------------------------------------------------
-# 8.1 提取所有组织中的 单核 (Monocytes) 和 巨噬 (Macrophages/Macrophage)
-# ------------------------------------------------------------------------------
+# 8.1 提取细胞 (同前)
 myeloid_list <- list()
-
 for (tissue in names(sc_by_tissue)) {
   obj <- sc_by_tissue[[tissue]]
-  
-  # 查找该组织中是否存在髓系细胞
-  # 注意：你的代码中可能存在 "Macrophages" 或 "Macrophage"，这里做模糊匹配
   target_cells <- grep("Monocytes|Macrophage", obj$cell_type, value = TRUE, ignore.case = TRUE)
-  
   if (length(target_cells) > 0) {
-    print(paste("  -> 从", tissue, "提取髓系细胞..."))
-    # 提取细胞
-    sub_obj <- subset(obj, subset = cell_type %in% target_cells)
-    # 记录原始组织来源，防止混淆
-    sub_obj$Original_Tissue <- tissue
-    myeloid_list[[tissue]] <- sub_obj
-  }
-}
-
-if (length(myeloid_list) == 0) stop("❌ 未找到任何单核或巨噬细胞，无法进行分析。")
-
-# 合并所有组织的髓系细胞
-myeloid_combined <- merge(myeloid_list[[1]], y = myeloid_list[2:length(myeloid_list)])
-DefaultAssay(myeloid_combined) <- "RNA"
-
-# ------------------------------------------------------------------------------
-# 8.2 重新定义分组 (重点：把 Fkbp5+ Cold Mono 单独拎出来)
-# ------------------------------------------------------------------------------
-# 1. 确保 Fkbp5 基因存在
-if (!"Fkbp5" %in% rownames(myeloid_combined)) {
-  stop("❌ 数据中未找到 Fkbp5 基因，请检查拼写或基因过滤步骤。")
-}
-
-# 2. 获取 Fkbp5 表达量
-fkbp5_counts <- GetAssayData(myeloid_combined, layer = "counts")["Fkbp5", ]
-
-# 3. 创建新的详细注释列 "Myeloid_Subtype"
-# 逻辑：
-# - 如果是 Macrophage -> 保持 "Macrophages"
-# - 如果是 Monocyte 且 在 Cold 组 且 Fkbp5 > 0 -> "Fkbp5+ Cold Mono"
-# - 其他 Monocyte -> "Canonical Monocytes"
-
-current_types <- myeloid_combined$cell_type
-groups <- myeloid_combined$Group
-
-new_labels <- vector("character", length = ncol(myeloid_combined))
-
-for (i in 1:ncol(myeloid_combined)) {
-  ctype <- current_types[i]
-  grp <- groups[i]
-  expr <- fkbp5_counts[i]
-  
-  # 判断是否为巨噬细胞 (包含 Macrophage 字符串)
-  if (grepl("Macrophage", ctype, ignore.case = TRUE)) {
-    new_labels[i] <- "Macrophages"
-  } else {
-    # 如果是单核细胞
-    if (grp == "Cold_4C" && expr > 0) {
-      new_labels[i] <- "Fkbp5+ Cold Mono" # 目标群体
-    } else {
-      new_labels[i] <- "Canonical Monocytes" # 普通单核
+    sub_obj <- subset(obj, subset = cell_type %in% target_cells & Group == "Cold_4C")
+    if (ncol(sub_obj) > 0) {
+      print(paste("  -> 从", tissue, "提取 Cold_4C 髓系细胞:", ncol(sub_obj), "个"))
+      sub_obj$Original_Tissue <- tissue
+      myeloid_list[[tissue]] <- sub_obj
     }
   }
 }
 
-myeloid_combined$Myeloid_Subtype <- factor(new_labels, levels = c("Canonical Monocytes", "Fkbp5+ Cold Mono", "Macrophages"))
-print("✅ 分组定义完成。各组细胞数：")
-print(table(myeloid_combined$Myeloid_Subtype))
+if (length(myeloid_list) == 0) stop("❌ 未找到 Cold_4C 髓系细胞")
+
+# 合并对象
+myeloid_combined <- merge(myeloid_list[[1]], y = myeloid_list[2:length(myeloid_list)])
+DefaultAssay(myeloid_combined) <- "RNA"
 
 # ------------------------------------------------------------------------------
-# 8.3 重新处理数据 (标准化 -> PCA -> UMAP)
+# 【关键修复 1】合并层 (JoinLayers) - 针对 Seurat V5 必须执行
 # ------------------------------------------------------------------------------
-print("  -> 正在重构髓系亚群的 UMAP...")
+print("  -> [V5 修复] 正在合并不同组织的矩阵层 (JoinLayers)...")
+myeloid_combined <- JoinLayers(myeloid_combined) 
 
+# ------------------------------------------------------------------------------
+# 【关键修复 2】更加稳健的 Fkbp5 提取方式
+# ------------------------------------------------------------------------------
+if (!"Fkbp5" %in% rownames(myeloid_combined)) {
+  # 尝试模糊匹配，防止大小写问题 (小鼠应该是 Fkbp5)
+  real_name <- grep("Fkbp5", rownames(myeloid_combined), ignore.case = TRUE, value = TRUE)
+  if(length(real_name) > 0) {
+    target_gene <- real_name[1]
+  } else {
+    stop("❌ 矩阵中完全找不到 Fkbp5 基因，请检查过滤步骤是否误删。")
+  }
+} else {
+  target_gene <- "Fkbp5"
+}
+
+# 提取表达量 (使用 JoinLayers 后的单矩阵提取)
+fkbp5_counts <- GetAssayData(myeloid_combined, assay = "RNA", layer = "counts")[target_gene, ]
+
+# 8.2 定义亚群
+new_labels <- ifelse(grepl("Macrophage", myeloid_combined$cell_type, ignore.case = TRUE), 
+                     "Macrophages (Cold)", 
+                     ifelse(fkbp5_counts > 0, "Fkbp5+ Mono (Cold)", "Monocytes (Cold)"))
+
+myeloid_combined$Myeloid_Subtype <- factor(new_labels, levels = c("Monocytes (Cold)", "Fkbp5+ Mono (Cold)", "Macrophages (Cold)"))
+print("✅ 分组定义完成。")
+
+# 8.3 重新处理
+print("  -> 正在进行标准化和降维...")
 myeloid_combined <- NormalizeData(myeloid_combined)
 myeloid_combined <- FindVariableFeatures(myeloid_combined, nfeatures = 2000)
 myeloid_combined <- ScaleData(myeloid_combined)
 myeloid_combined <- RunPCA(myeloid_combined, verbose = FALSE)
-
-# 此时不进行去批次处理(Harmony等)，目的是为了看它们最原始的生物学相似性
 myeloid_combined <- RunUMAP(myeloid_combined, dims = 1:20)
 
 # ------------------------------------------------------------------------------
 # 8.4 绘图：直观展示位置关系
 # ------------------------------------------------------------------------------
 # 图1：UMAP 分布图
-p_trace <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1) +
-  scale_color_manual(values = c("Canonical Monocytes" = "lightgrey", 
-                                "Fkbp5+ Cold Mono" = "#E41A1C",  # 红色突出显示
-                                "Macrophages" = "#377EB8")) +    # 蓝色
-  ggtitle("Fkbp5+ Monocytes Tracing") +
+p_trace <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1.5) +
+  scale_color_manual(values = c("Monocytes (Cold)" = "lightgrey", 
+                                "Fkbp5+ Mono (Cold)" = "#E41A1C",  # 红色
+                                "Macrophages (Cold)" = "#377EB8")) + # 蓝色
+  ggtitle("Fkbp5+ Cluster Tracing (Cold Only)") +
   theme_minimal()
 
-# 图2：Fkbp5 基因表达分布
-p_gene <- FeaturePlot(myeloid_combined, features = "Fkbp5", order = TRUE) + scale_color_viridis_c()
+# 图2：Fkbp5 基因表达分布 (验证用)
+p_gene <- FeaturePlot(myeloid_combined, features = "Fkbp5", order = TRUE) + 
+  scale_color_viridis_c() + ggtitle("Fkbp5 Expression")
 
 # 保存图片
-ggsave(filename = "Fkbp5_Tracing_UMAP.png", plot = p_trace + p_gene, width = 14, height = 6, path = data_dir)
-print(paste("  ✅ 溯源图已保存: Fkbp5_Tracing_UMAP.png"))
+filename_umap <- "Fkbp5_Tracing_Cold_Only_UMAP.png"
+ggsave(filename = filename_umap, plot = p_trace + p_gene, width = 14, height = 6, path = data_dir)
+print(paste("  ✅ 溯源图已保存:", filename_umap))
 
 # ------------------------------------------------------------------------------
-# 8.5 计算相关性 (Pearson Correlation) - 数学上的结论
+# 8.5 (修正版) 计算转录组相关性 (解决 cor() 矩阵匹配报错)
 # ------------------------------------------------------------------------------
 print("  -> 正在计算转录组相关性...")
 
-# 1. 计算三个群体的平均表达谱 (Pseudo-bulk)
-# AverageExpression 返回的是一个 list，取 "RNA" 插槽
-avg_expr <- AverageExpression(myeloid_combined, group.by = "Myeloid_Subtype", assays = "RNA")$RNA
+# 1. 计算平均表达谱
+# assays = "RNA" 确保只提取 RNA 层数据
+avg_data <- AverageExpression(myeloid_combined, group.by = "Myeloid_Subtype", assays = "RNA")
 
-# 2. 计算相关性矩阵 (使用高变基因或全基因)
-# 为了更准确，我们通常使用高变基因来计算相关性
+# 2. 【关键修复】显式转换为矩阵格式并处理空值
+# Seurat V5 的结果可能在 list 的第一个元素中
+if (is.list(avg_data)) {
+  avg_expr_mat <- as.matrix(avg_data$RNA) 
+} else {
+  avg_expr_mat <- as.matrix(avg_data)
+}
+
+# 3. 筛选高变基因进行计算
 var_genes <- VariableFeatures(myeloid_combined)
-cor_mat <- cor(log1p(avg_expr[var_genes, ]), method = "pearson")
+valid_genes <- intersect(var_genes, rownames(avg_expr_mat))
 
-print("📊 相关性矩阵结果:")
-print(cor_mat)
+# 检查是否有足够的基因参与计算
+if (length(valid_genes) < 50) {
+  print("  ⚠️ 高变基因匹配过少，尝试使用全部基因进行相关性计算...")
+  valid_genes <- rownames(avg_expr_mat)
+}
 
-# 3. 绘制热图
+print(paste("  📊 参与相关性计算的基因数量:", length(valid_genes)))
+
+# 4. 【核心修复】使用 as.matrix() 并进行 log 转换
+# 对数据进行对数化，减少极值对相关性的干扰
+target_data_for_cor <- as.matrix(log1p(avg_expr_mat[valid_genes, ]))
+
+# 5. 计算 Pearson 相关性矩阵
+# 这里转置一下，确保是对“列（细胞类型）”之间计算相关性
+cor_mat <- cor(target_data_for_cor, method = "pearson")
+
+# 6. 打印结果到控制台，方便直接查看数值
+print("📈 相关性矩阵结果 (Correlation Matrix):")
+print(round(cor_mat, 4))
+
+# 7. 绘制并保存热图
 library(pheatmap)
-p_heatmap <- pheatmap(cor_mat, 
-         display_numbers = TRUE, 
-         cluster_rows = FALSE, 
-         cluster_cols = FALSE,
-         main = "Transcriptome Similarity (Pearson Cor)",
-         fontsize_number = 15)
+filename_heatmap <- "Fkbp5_Similarity_Cold_Only_Heatmap.png"
 
-# 保存热图
-# pheatmap 保存需要特定方法
-png(file.path(data_dir, "Fkbp5_Similarity_Heatmap.png"), width = 600, height = 600)
-pheatmap(cor_mat, display_numbers = TRUE, cluster_rows = FALSE, cluster_cols = FALSE, fontsize_number = 15)
-dev.off()
-
-print("🎉 深度分析完成！请检查:")
-print("   1. Fkbp5_Tracing_UMAP.png (看位置：红点离灰点近，还是离蓝点近？)")
-print("   2. Fkbp5_Similarity_Heatmap.png (看数值：相关系数越接近1越相似)")
+tryCatch({
+  png(file.path(data_dir, filename_heatmap), width = 700, height = 600, res = 120)
+  pheatmap(cor_mat, 
+           display_numbers = TRUE, 
+           number_color = "black",
+           cluster_rows = FALSE, 
+           cluster_cols = FALSE,
+           color = colorRampPalette(c("#4575b4", "white", "#d73027"))(100),
+           main = "Lineage Similarity (Pearson Cor)",
+           fontsize = 12,
+           fontsize_number = 14)
+  dev.off()
+  print(paste("  ✅ 相关性热图已保存:", filename_heatmap))
+}, error = function(e) {
+  print(paste("  ❌ 热图保存失败:", e$message))
+})
