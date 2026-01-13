@@ -487,3 +487,146 @@ for (tissue_name in names(sc_by_tissue)) {
 }
 
 print("🎉 分析完成！请查看 DE_Results 文件夹内的分类结果。")
+# ==============================================================================
+# 8. 深度分析：Fkbp5+ 单核细胞溯源 (Monocyte vs Macrophage 相似性分析)
+# ==============================================================================
+print("🚀 步骤8/8: 正在进行 Fkbp5+ 单核细胞的谱系定位分析...")
+
+# ------------------------------------------------------------------------------
+# 8.1 提取所有组织中的 单核 (Monocytes) 和 巨噬 (Macrophages/Macrophage)
+# ------------------------------------------------------------------------------
+myeloid_list <- list()
+
+for (tissue in names(sc_by_tissue)) {
+  obj <- sc_by_tissue[[tissue]]
+  
+  # 查找该组织中是否存在髓系细胞
+  # 注意：你的代码中可能存在 "Macrophages" 或 "Macrophage"，这里做模糊匹配
+  target_cells <- grep("Monocytes|Macrophage", obj$cell_type, value = TRUE, ignore.case = TRUE)
+  
+  if (length(target_cells) > 0) {
+    print(paste("  -> 从", tissue, "提取髓系细胞..."))
+    # 提取细胞
+    sub_obj <- subset(obj, subset = cell_type %in% target_cells)
+    # 记录原始组织来源，防止混淆
+    sub_obj$Original_Tissue <- tissue
+    myeloid_list[[tissue]] <- sub_obj
+  }
+}
+
+if (length(myeloid_list) == 0) stop("❌ 未找到任何单核或巨噬细胞，无法进行分析。")
+
+# 合并所有组织的髓系细胞
+myeloid_combined <- merge(myeloid_list[[1]], y = myeloid_list[2:length(myeloid_list)])
+DefaultAssay(myeloid_combined) <- "RNA"
+
+# ------------------------------------------------------------------------------
+# 8.2 重新定义分组 (重点：把 Fkbp5+ Cold Mono 单独拎出来)
+# ------------------------------------------------------------------------------
+# 1. 确保 Fkbp5 基因存在
+if (!"Fkbp5" %in% rownames(myeloid_combined)) {
+  stop("❌ 数据中未找到 Fkbp5 基因，请检查拼写或基因过滤步骤。")
+}
+
+# 2. 获取 Fkbp5 表达量
+fkbp5_counts <- GetAssayData(myeloid_combined, layer = "counts")["Fkbp5", ]
+
+# 3. 创建新的详细注释列 "Myeloid_Subtype"
+# 逻辑：
+# - 如果是 Macrophage -> 保持 "Macrophages"
+# - 如果是 Monocyte 且 在 Cold 组 且 Fkbp5 > 0 -> "Fkbp5+ Cold Mono"
+# - 其他 Monocyte -> "Canonical Monocytes"
+
+current_types <- myeloid_combined$cell_type
+groups <- myeloid_combined$Group
+
+new_labels <- vector("character", length = ncol(myeloid_combined))
+
+for (i in 1:ncol(myeloid_combined)) {
+  ctype <- current_types[i]
+  grp <- groups[i]
+  expr <- fkbp5_counts[i]
+  
+  # 判断是否为巨噬细胞 (包含 Macrophage 字符串)
+  if (grepl("Macrophage", ctype, ignore.case = TRUE)) {
+    new_labels[i] <- "Macrophages"
+  } else {
+    # 如果是单核细胞
+    if (grp == "Cold_4C" && expr > 0) {
+      new_labels[i] <- "Fkbp5+ Cold Mono" # 目标群体
+    } else {
+      new_labels[i] <- "Canonical Monocytes" # 普通单核
+    }
+  }
+}
+
+myeloid_combined$Myeloid_Subtype <- factor(new_labels, levels = c("Canonical Monocytes", "Fkbp5+ Cold Mono", "Macrophages"))
+print("✅ 分组定义完成。各组细胞数：")
+print(table(myeloid_combined$Myeloid_Subtype))
+
+# ------------------------------------------------------------------------------
+# 8.3 重新处理数据 (标准化 -> PCA -> UMAP)
+# ------------------------------------------------------------------------------
+print("  -> 正在重构髓系亚群的 UMAP...")
+
+myeloid_combined <- NormalizeData(myeloid_combined)
+myeloid_combined <- FindVariableFeatures(myeloid_combined, nfeatures = 2000)
+myeloid_combined <- ScaleData(myeloid_combined)
+myeloid_combined <- RunPCA(myeloid_combined, verbose = FALSE)
+
+# 此时不进行去批次处理(Harmony等)，目的是为了看它们最原始的生物学相似性
+myeloid_combined <- RunUMAP(myeloid_combined, dims = 1:20)
+
+# ------------------------------------------------------------------------------
+# 8.4 绘图：直观展示位置关系
+# ------------------------------------------------------------------------------
+# 图1：UMAP 分布图
+p_trace <- DimPlot(myeloid_combined, reduction = "umap", group.by = "Myeloid_Subtype", pt.size = 1) +
+  scale_color_manual(values = c("Canonical Monocytes" = "lightgrey", 
+                                "Fkbp5+ Cold Mono" = "#E41A1C",  # 红色突出显示
+                                "Macrophages" = "#377EB8")) +    # 蓝色
+  ggtitle("Fkbp5+ Monocytes Tracing") +
+  theme_minimal()
+
+# 图2：Fkbp5 基因表达分布
+p_gene <- FeaturePlot(myeloid_combined, features = "Fkbp5", order = TRUE) + scale_color_viridis_c()
+
+# 保存图片
+ggsave(filename = "Fkbp5_Tracing_UMAP.png", plot = p_trace + p_gene, width = 14, height = 6, path = data_dir)
+print(paste("  ✅ 溯源图已保存: Fkbp5_Tracing_UMAP.png"))
+
+# ------------------------------------------------------------------------------
+# 8.5 计算相关性 (Pearson Correlation) - 数学上的结论
+# ------------------------------------------------------------------------------
+print("  -> 正在计算转录组相关性...")
+
+# 1. 计算三个群体的平均表达谱 (Pseudo-bulk)
+# AverageExpression 返回的是一个 list，取 "RNA" 插槽
+avg_expr <- AverageExpression(myeloid_combined, group.by = "Myeloid_Subtype", assays = "RNA")$RNA
+
+# 2. 计算相关性矩阵 (使用高变基因或全基因)
+# 为了更准确，我们通常使用高变基因来计算相关性
+var_genes <- VariableFeatures(myeloid_combined)
+cor_mat <- cor(log1p(avg_expr[var_genes, ]), method = "pearson")
+
+print("📊 相关性矩阵结果:")
+print(cor_mat)
+
+# 3. 绘制热图
+library(pheatmap)
+p_heatmap <- pheatmap(cor_mat, 
+         display_numbers = TRUE, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE,
+         main = "Transcriptome Similarity (Pearson Cor)",
+         fontsize_number = 15)
+
+# 保存热图
+# pheatmap 保存需要特定方法
+png(file.path(data_dir, "Fkbp5_Similarity_Heatmap.png"), width = 600, height = 600)
+pheatmap(cor_mat, display_numbers = TRUE, cluster_rows = FALSE, cluster_cols = FALSE, fontsize_number = 15)
+dev.off()
+
+print("🎉 深度分析完成！请检查:")
+print("   1. Fkbp5_Tracing_UMAP.png (看位置：红点离灰点近，还是离蓝点近？)")
+print("   2. Fkbp5_Similarity_Heatmap.png (看数值：相关系数越接近1越相似)")
