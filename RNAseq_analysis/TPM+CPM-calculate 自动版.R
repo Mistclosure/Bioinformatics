@@ -13,8 +13,8 @@ library(GenomicRanges)
 counts_file <- "Phf20_1.23_counts.csv"
 
 # 注释文件路径
-gene_gtf_path <- "/mnt/windowsdata/qiuzerui/RNAannotations\\annotationHv49\\gencode.v49.annotation_PRI.gtf"
-te_gtf_path   <- "/mnt/windowsdata/qiuzerui/RNAannotations\\annotationHv49\\h38_TE.gtf"
+gene_gtf_path <- "/mnt/windowsdata/qiuzerui/RNAannotations/annotationMv38/gencode.vM38.annotation_PRI.gtf"
+te_gtf_path   <- "/mnt/windowsdata/qiuzerui/RNAannotations/annotationMv38/m39_TE.gtf"
 
 # 输出文件名
 output_cpm_file <- "Phf20_1.23_CPM.csv"  
