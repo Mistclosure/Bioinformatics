@@ -1,7 +1,7 @@
 # ==============================================================================
 # 综合处理脚本：双输出模式 (修复版 - 解决 Y_RNA 重复问题)
 # ==============================================================================
-
+setwd('/mnt/windowsdata/qiuzerui/Phf20-26.1.23/')
 library(data.table)
 library(dplyr)
 library(rtracklayer)
@@ -10,23 +10,23 @@ library(GenomicRanges)
 # ==============================
 # 1. 参数与路径设置
 # ==============================
-counts_file <- "PHF20_counts.csv"
+counts_file <- "Phf20_1.23_counts.csv"
 
 # 注释文件路径
-gene_gtf_path <- "\\\\wsl.localhost\\Ubuntu\\home\\qiuzerui\\RNA-seq\\annotations\\annotationHv49\\gencode.v49.annotation_PRI.gtf"
-te_gtf_path   <- "\\\\wsl.localhost\\Ubuntu\\home\\qiuzerui\\RNA-seq\\annotations\\annotationHv49\\h38_TE.gtf"
+gene_gtf_path <- "/mnt/windowsdata/qiuzerui/RNAannotations\\annotationHv49\\gencode.v49.annotation_PRI.gtf"
+te_gtf_path   <- "/mnt/windowsdata/qiuzerui/RNAannotations\\annotationHv49\\h38_TE.gtf"
 
 # 输出文件名
-output_cpm_file <- "PHF20_GSE82115_CPM.csv"  
-output_tpm_file <- "PHF20_GSE82115_TPM.csv"  
-samplename <- c('shNT_rep1','shNT_rep2','shNT_rep3','shPHF20_rep1','shPHF20_rep2','shPHF20_rep3')
+output_cpm_file <- "Phf20_1.23_CPM.csv"  
+output_tpm_file <- "Phf20_1.23_TPM.csv"  
+#samplename <- c('shNT_rep1','shNT_rep2','shNT_rep3','shPHF20_rep1','shPHF20_rep2','shPHF20_rep3')
 
 # ==============================
 # 2. 读取数据与准备注释 (保留唯一ID)
 # ==============================
 message(paste0("[", Sys.time(), "] 正在读取 Counts 文件..."))
 counts_df <- fread(counts_file)
-colnames(counts_df)[2:ncol(counts_df)] <- samplename
+#colnames(counts_df)[2:ncol(counts_df)] <- samplename
 
 # --- 2.1 加载 GTF 提取 Gene Symbol ---
 message(paste0("[", Sys.time(), "] 正在加载 GTF 以匹配 Gene Symbol..."))
