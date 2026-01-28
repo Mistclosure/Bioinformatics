@@ -214,7 +214,7 @@ df_te$Log2FC <- round(log2(mean_treat + pseudo) - log2(mean_ctrl + pseudo), 4)
 # 5. 计算 P-value (定义函数并计算)
 # ==============================
 
-# 定义 T-test 函数 (确保这是一个完整的代码块)
+# 定义 T-test 函数 (改为普通 Student's t-test)
 calc_pval <- function(x, c_cols, t_cols) {
   v_c <- as.numeric(x[c_cols])
   v_t <- as.numeric(x[t_cols])
@@ -223,14 +223,10 @@ calc_pval <- function(x, c_cols, t_cols) {
   if (var(v_c) == 0 && var(v_t) == 0) return(1)
   
   tryCatch({
-    t.test(v_t, v_c)$p.value
+    # 添加 var.equal = TRUE 切换为普通 t 检验
+    t.test(v_t, v_c, var.equal = TRUE)$p.value
   }, error = function(e) NA)
 }
-
-# 执行计算 (apply 会逐行调用上述函数)
-df_te$PValue <- apply(df_te, 1, calc_pval, c_cols = ctrl_cpm_cols, t_cols = treat_cpm_cols)
-df_te$PValue <- round(df_te$PValue, 5)
-
 # ==============================
 # 6. 整理输出 (移除 RepeatID, Symbol, Counts)
 # ==============================
