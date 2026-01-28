@@ -67,7 +67,9 @@ for SAMPLE in "${SAMPLES[@]}"; do
     echo "[$SAMPLE] 步骤 3: 正在运行 Cell Ranger 定量 (线程: $THREADS)..."
     
     if [ ! -d "Output_${SAMPLE}" ]; then
+        # 修改点：增加了 --create-bam=false
         cellranger count --id="Output_${SAMPLE}" \
+                         --create-bam=false \
                          --transcriptome="$REF_PATH" \
                          --fastqs="$OUT_DIR" \
                          --sample="$SAMPLE" \
@@ -81,9 +83,5 @@ for SAMPLE in "${SAMPLES[@]}"; do
     else
         echo "[$SAMPLE] Output 目录已存在，跳过定量步骤。"
     fi
-    
-    echo "<<<< 样本 $SAMPLE 处理完毕！"
-done
-
 echo "--------------------------------------------------------"
 echo "所有任务完成！结果位于: $OUT_DIR"
