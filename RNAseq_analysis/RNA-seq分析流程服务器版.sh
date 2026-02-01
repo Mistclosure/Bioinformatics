@@ -1,6 +1,7 @@
 # ==========================================
 # TE Analysis Pipeline (Phf20-26.1.23 综合版)
 # 包含：TEcount(家族) + featureCounts(基因) + TElocal(位点)
+# 修正记录: 修复 TElocal 索引路径报错问题
 # ==========================================
 
 # 1. 尝试初始化 conda
@@ -12,6 +13,11 @@ fi
 
 # 2. 激活环境
 conda activate te_env
+
+# 🚨 预检: 确保 TElocal 已安装
+if ! command -v TElocal &> /dev/null; then
+    echo "⚠️ [警告] 未找到 TElocal 命令，请确保已运行: pip install TElocal"
+fi
 
 # ======================
 # 🚀 核心配置区域 (严格保留原始设置)
@@ -45,7 +51,8 @@ GTF_TE="${ANNO_DIR}/m39_TE.gtf"
 RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
 
 # --- [TElocal 专用索引] ---
-TELOCAL_INDEX="/mnt/windowsdata/qiuzerui/RNAannotations/TElocal/mm39_rmsk_TE.gtf"
+# ✅ [修正] 必须包含 .locInd 后缀，否则 TElocal 找不到文件
+TELOCAL_INDEX="/mnt/windowsdata/qiuzerui/RNAannotations/TElocal/mm39_rmsk_TE.gtf.locInd"
 
 # 初始化目录
 echo ">>> 正在初始化目录..."
@@ -185,13 +192,14 @@ fi
 # ==========================================
 echo "=== Step 6: TElocal 定量 (Locus Level) ==="
 
-# 内存保护：虽然总线程设为100，但TElocal加载索引极其消耗内存
-# 250G 内存环境下，限制 8 个并发样本是兼顾速度与安全的最优解
+# 内存保护：限制 8 个并发样本
 MAX_JOBS=8 
 
 if [ ${#bam_files[@]} -gt 0 ]; then
-    if [ ! -f "${TELOCAL_INDEX}.locInd" ]; then
-        echo "❌ [报错] TElocal 索引未找到: ${TELOCAL_INDEX}.locInd"
+    # ✅ [修正] 直接检查变量本身，不要再加 .locInd 后缀
+    if [ ! -f "${TELOCAL_INDEX}" ]; then
+        echo "❌ [报错] TElocal 索引未找到: ${TELOCAL_INDEX}"
+        echo "   请检查文件路径是否正确 (需包含 .locInd)"
     else
         for bam_file in "${bam_files[@]}"; do
             sample_name=$(basename "$bam_file" .Aligned.sortedByCoord.out.bam)
