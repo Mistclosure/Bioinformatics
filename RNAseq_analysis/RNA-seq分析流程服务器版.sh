@@ -217,6 +217,7 @@ if [ ${#bam_files[@]} -gt 0 ]; then
                         --TE "${TELOCAL_INDEX}" \
                         --project "${TELOCAL_PREFIX}" \
                         --stranded reverse --mode multi \
+                        --sortByPos \
                 && echo "🎉 [TElocal 完成] ${sample_name}"
             ) & 
 
