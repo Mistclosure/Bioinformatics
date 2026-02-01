@@ -221,3 +221,77 @@ else
     wait
     echo "✅ [Step 4] TEcount 运行结束！"
 fi
+# ==========================================
+# Step 4: TElocal (定位具体 TE 位点)
+# ==========================================
+echo "=== Step 4: TElocal 定量 (Locus Level) ==="
+
+# --- [注意] 这里需要配置 TElocal 专用的索引路径 ---
+# TElocal 不接受 .gtf 文件作为 --TE 的输入，它需要索引的前缀。
+# 假设你下载的索引解压在 index 目录，文件名类似 mm10_rmsk_TE.ind...
+# 这里的路径填写到文件名前缀，例如: /path/to/mm10_rmsk_TE
+# 即使文件是 m39，TElocal 官网提供的预构建索引通常还是基于 mm10 重映射或 m39 构建的，请确认你下载的文件。
+TELOCAL_INDEX="${BASE_DIR}/RNA-seq/indexes/TElocal_index_m39/m39_rmsk_TE" 
+
+# [安全策略] 并行任务数限制
+# 250G 内存建议同时运行不超过 8 个 TElocal 任务 (预留 buffer)
+MAX_JOBS=8 
+
+shopt -s nullglob
+bam_files=(${ALIGN_DIR}/*.Aligned.sortedByCoord.out.bam)
+shopt -u nullglob
+
+count_bams=${#bam_files[@]}
+
+if [ "$count_bams" -eq "0" ]; then
+    echo "❌ [报错] 未找到 BAM 文件，无法进行定量。"
+else
+    # 检查索引是否存在 (简单检查 .ind 文件是否存在，TElocal 索引通常生成 .ind 文件)
+    if ! ls "${TELOCAL_INDEX}"*.ind &> /dev/null; then
+        echo "❌ [致命错误] TElocal 索引未找到！"
+        echo "   请注意: TElocal 需要专门的索引，不能直接使用 GTF 文件。"
+        echo "   检查路径: ${TELOCAL_INDEX}"
+        exit 1
+    fi
+
+    echo "✅ 准备定量 $count_bams 个样本 (使用 TElocal)..."
+    echo "   并行策略: 每次并发 $MAX_JOBS 个任务，防止内存溢出。"
+
+    for bam_file in "${bam_files[@]}"; do
+        sample_name=$(basename "$bam_file" .Aligned.sortedByCoord.out.bam)
+
+        # 检查输出目录，TElocal 输出文件较多，建议整理
+        OUT_PREFIX="${COUNTS_DIR}/${sample_name}"
+
+        if [ -f "${OUT_PREFIX}.cntTable" ]; then
+            echo "✅ [跳过] ${sample_name} 定量已完成。"
+            continue
+        fi
+
+        echo "🚀 [后台运行] TElocal: ${sample_name}"
+
+        (
+            # TElocal 命令
+            # --TE: 指向索引前缀
+            # --mode multi: 处理多比对 reads
+            TElocal -b "${bam_file}" \
+                    --GTF "${GTF_GENE}" \
+                    --TE "${TELOCAL_INDEX}" \
+                    --project "${OUT_PREFIX}" \
+                    --stranded reverse \
+                    --mode multi \
+            && echo "🎉 [完成] ${sample_name}"
+        ) & 
+
+        # --- 并行控制逻辑 ---
+        # 如果后台任务数 >= MAX_JOBS，则等待任意一个任务完成
+        while (( $(jobs -r -p | wc -l) >= MAX_JOBS )); do
+            sleep 5 # 每 5 秒检查一次
+        done
+        # -------------------
+    done
+    
+    echo "⏳ 正在处理剩余任务..."
+    wait
+    echo "✅ [Step 4] TElocal 运行结束！"
+fi
