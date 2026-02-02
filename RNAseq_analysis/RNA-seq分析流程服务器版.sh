@@ -29,7 +29,8 @@ ulimit -n 65535
 # [CPU 策略]
 HIGH_THREADS=100    
 MID_THREADS=80     
-LOW_THREADS=50     
+LOW_THREADS=50
+Featurecount_THREADS=64
 
 # [内存 策略]
 DUMP_MEM="8000MB"  
@@ -174,8 +175,8 @@ else
         if [ -f "${FC_OUTPUT}" ]; then
             echo "✅ [跳过] featureCounts 结果已存在。"
         else
-            echo "🚀 [启动] featureCounts (线程: ${HIGH_THREADS})..."
-            featureCounts -T ${HIGH_THREADS} \
+            echo "🚀 [启动] featureCounts (线程: ${Featurecount_THREADS})..."
+            featureCounts -T ${Featurecount_THREADS} \
                           -p -s 2 \
                           -a "${GTF_GENE}" \
                           -o "${FC_OUTPUT}" \
