@@ -1,0 +1,208 @@
+# ==============================================================================
+# Phf20 TElocal 差异分析与绘图 (修复版)
+# ==============================================================================
+
+# 1. 加载包
+library(pacman)
+p_load(DESeq2, ggplot2, dplyr, tidyr, ggrepel, stringr, RColorBrewer, data.table)
+
+# 2. 设置路径和读取数据
+wd <- '/mnt/windowsdata/qiuzerui/Phf20-26.1.23'
+setwd(wd)
+file_name <- "Phf20_1.23_TElocal_locus_counts.csv"
+
+# 读取数据
+counts_data <- read.csv(file_name, row.names = 1, check.names = FALSE)
+
+# --- [修复] 数据清洗 ---
+# 显式转换为数值矩阵，避免 storage.mode 产生的警告
+counts_matrix <- as.matrix(counts_data)
+counts_matrix <- apply(counts_matrix, 2, function(x) as.numeric(as.character(x)))
+rownames(counts_matrix) <- rownames(counts_data) # 恢复行名
+counts_matrix[is.na(counts_matrix)] <- 0
+
+print("原始数据预览:")
+head(counts_matrix)
+
+# ==============================================================================
+# Step 1: DESeq2 差异分析
+# ==============================================================================
+
+# 定义分组
+condition <- factor(c("Scramble", "Scramble", "KO", "KO"), levels = c("Scramble", "KO"))
+# 确保 colData 的行名与矩阵列名一致
+colData <- data.frame(row.names = colnames(counts_matrix), condition = condition)
+
+# 构建 DESeq2 对象
+dds <- DESeqDataSetFromMatrix(countData = round(counts_matrix), 
+                              colData = colData, 
+                              design = ~ condition)
+
+# 运行分析
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", "KO", "Scramble"))
+
+# 转为数据框
+df <- as.data.frame(res)
+df$RepeatID <- rownames(df)
+df <- na.omit(df)
+
+# ==============================================================================
+# Step 2: 解析 TE ID
+# ==============================================================================
+
+df <- df %>%
+  separate(RepeatID, 
+           into = c("Locus_Name", "Family", "Class", "SuperFamily"), 
+           sep = ":", 
+           remove = FALSE, 
+           extra = "merge", 
+           fill = "right")
+
+# ==============================================================================
+# Step 3: 绘制火山图
+# ==============================================================================
+
+fc_cutoff <- 1
+pval_cutoff <- 0.05
+
+top_genes <- df %>%
+  filter(padj < pval_cutoff, abs(log2FoldChange) > fc_cutoff) %>%
+  arrange(padj) %>%
+  head(10) %>%
+  pull(Locus_Name)
+
+df$color_group <- "ns"
+df$color_group[df$log2FoldChange > fc_cutoff & df$padj < pval_cutoff] <- "Up"
+df$color_group[df$log2FoldChange < -fc_cutoff & df$padj < pval_cutoff] <- "Down"
+
+p_volcano <- ggplot(df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = color_group), alpha = 0.6, size = 1.5) +
+  scale_color_manual(values = c("Up" = "#D53E4F", "Down" = "#3288BD", "ns" = "grey80")) +
+  geom_vline(xintercept = c(-fc_cutoff, fc_cutoff), linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -log10(pval_cutoff), linetype = "dashed", color = "grey50") +
+  geom_text_repel(data = subset(df, Locus_Name %in% top_genes),
+                  aes(label = Locus_Name),
+                  size = 3, box.padding = 0.5, max.overlaps = Inf) +
+  theme_classic() +
+  labs(title = "Volcano Plot (TE Loci)", x = "log2 Fold Change", y = "-log10(padj)") +
+  theme(legend.position = "none")
+
+ggsave("Phf20_Volcano.pdf", p_volcano, width = 6, height = 5)
+
+# ==============================================================================
+# Step 4: 绘制分类抖动图
+# ==============================================================================
+
+top_classes <- names(sort(table(df$SuperFamily), decreasing = T))[1:6]
+plot_df <- df %>% filter(SuperFamily %in% top_classes)
+highlight_df <- subset(plot_df, Locus_Name %in% top_genes)
+
+p_violin <- ggplot(plot_df, aes(x = SuperFamily, y = log2FoldChange)) +
+  geom_violin(aes(color = SuperFamily), fill = NA, scale = "width", size = 0.8) +
+  geom_jitter(color = "grey70", size = 0.3, alpha = 0.3, width = 0.25) +
+  geom_point(data = highlight_df, color = "red", size = 2) +
+  geom_text_repel(data = highlight_df,
+                  aes(label = Locus_Name),
+                  color = "red", size = 3, min.segment.length = 0) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_classic() +
+  labs(title = "Log2FC by TE Class", x = "TE Class", y = "log2 Fold Change") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("Phf20_Class_Violin.pdf", p_violin, width = 8, height = 6)
+
+# ==============================================================================
+# Step 5: 读取 FeatureCounts 基因数据并进行 DESeq2 分析
+# ==============================================================================
+
+gene_counts_raw <- read.table("counts/all_samples_featureCounts.txt", header = TRUE, skip = 1, row.names = 1, check.names = FALSE)
+
+# 筛选计数列
+gene_counts <- gene_counts_raw[, (ncol(gene_counts_raw)-3):ncol(gene_counts_raw)]
+
+# 强制重命名列名
+colnames(gene_counts) <- c("Scr_1", "Scr_2", "KO_1", "KO_2")
+
+# --- [修复] 重新构建 colData 以匹配 gene_counts 的列名 ---
+colData_gene <- data.frame(
+  condition = condition, 
+  row.names = colnames(gene_counts)
+)
+
+# 运行基因的 DESeq2
+dds_gene <- DESeqDataSetFromMatrix(countData = round(as.matrix(gene_counts)), 
+                                   colData = colData_gene, 
+                                   design = ~ condition)
+
+keep <- rowSums(counts(dds_gene)) >= 10
+dds_gene <- dds_gene[keep, ]
+dds_gene <- DESeq(dds_gene)
+res_gene <- results(dds_gene, contrast = c("condition", "KO", "Scramble"))
+df_gene <- as.data.frame(res_gene)
+df_gene$GeneID <- rownames(df_gene)
+
+# ==============================================================================
+# Step 6: 使用本地 GTF 文件进行注释
+# ==============================================================================
+
+gtf_path <- "/mnt/windowsdata/qiuzerui/RNAannotations/annotationMv38/gencode.vM38.annotation_PRI.gtf"
+message("正在读取本地 GTF 文件...")
+
+gtf_data <- fread(gtf_path, header = FALSE, sep = "\t", quote = "") 
+gene_anno_raw <- gtf_data[V3 == "gene", V9]
+
+extract_attr <- function(text, key) {
+  str_match(text, paste0(key, ' "([^"]+)"'))[,2]
+}
+
+gene_map <- data.frame(
+  GeneID = extract_attr(gene_anno_raw, "gene_id"),
+  biotype = extract_attr(gene_anno_raw, "gene_type"),
+  stringsAsFactors = FALSE
+)
+
+if (all(is.na(gene_map$biotype))) {
+  gene_map$biotype <- extract_attr(gene_anno_raw, "gene_biotype")
+}
+
+df_gene <- merge(df_gene, gene_map, by = "GeneID", all.x = TRUE)
+
+df_gene$Category <- "Other"
+df_gene$Category[df_gene$biotype == "protein_coding"] <- "mRNA"
+df_gene$Category[df_gene$biotype == "lncRNA"] <- "lncRNA"
+
+plot_genes <- df_gene %>% 
+  filter(Category %in% c("mRNA", "lncRNA")) %>%
+  select(log2FoldChange, Category)
+
+# ==============================================================================
+# Step 7: 合并 TE 数据并绘制全景箱线图
+# ==============================================================================
+
+plot_te <- df %>% 
+  select(log2FoldChange) %>%
+  mutate(Category = "repeatRNA")
+
+plot_data <- rbind(plot_genes, plot_te)
+plot_data$Category <- factor(plot_data$Category, 
+                             levels = c("mRNA", "lncRNA", "repeatRNA"))
+
+p_boxplot <- ggplot(plot_data, aes(x = Category, y = log2FoldChange)) +
+  geom_boxplot(aes(fill = Category), outlier.shape = NA, width = 0.6) +
+  coord_cartesian(ylim = c(-3, 3)) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_fill_manual(values = c("mRNA" = "#F8766D", 
+                               "lncRNA" = "#7CAE00", 
+                               "repeatRNA" = "#C77CFF")) +
+  theme_classic() +
+  labs(title = "Global Transcriptome Changes", 
+       y = "log2 fold change (KO vs Scramble)", x = "") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 12, face = "bold"),
+        axis.text.y = element_text(size = 10))
+
+ggsave("Phf20_Global_Boxplot.pdf", p_boxplot, width = 5, height = 6)
+print("任务完成！结果已保存。")
+print(table(plot_data$Category))
