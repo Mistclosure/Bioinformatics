@@ -37,7 +37,7 @@ DUMP_MEM="8000MB"
 STAR_RAM="150000000000" 
 
 # [路径配置]
-WORKDIR="/mnt/windowsdata/qiuzerui/Phf20-26.1.23"
+WORKDIR="/mnt/disk1/qiuzerui/downloads/Phf8_GSE212779"
 RAW_DIR="${WORKDIR}/rawdata"
 TRIM_DIR="${WORKDIR}/trimmed_fastq"
 CLEAN_DIR="${WORKDIR}/clean_non_rRNA"
@@ -45,11 +45,18 @@ ALIGN_DIR="${WORKDIR}/alignments"
 COUNTS_DIR="${WORKDIR}/counts"
 
 # 注释与索引
+#小鼠注释与索引
 ANNO_DIR="/mnt/windowsdata/qiuzerui/RNAannotations/annotationMv38"
 STAR_INDEX="/mnt/windowsdata/qiuzerui/indexes/star_index_m39"
 GTF_GENE="${ANNO_DIR}/gencode.vM38.annotation_PRI.gtf"
 GTF_TE="${ANNO_DIR}/m39_TE.gtf"
 RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
+#人类注释与索引
+#ANNO_DIR="/mnt/windowsdata/qiuzerui/RNAannotations/annotationHv49"
+#STAR_INDEX="/mnt/windowsdata/qiuzerui/indexes/star_index_h38"
+#GTF_GENE="${ANNO_DIR}/gencode.v49.annotation_PRI.gtf"
+#GTF_TE="${ANNO_DIR}/h38_TE.gtf"
+#RRNA_INDEX="${ANNO_DIR}/rRNA_mtDNA_index"
 
 # --- [TElocal 专用索引] ---
 # ✅ [修正] 必须包含 .locInd 后缀，否则 TElocal 找不到文件
