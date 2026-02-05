@@ -68,9 +68,9 @@ mkdir -p ${TRIM_DIR} ${CLEAN_DIR} ${ALIGN_DIR} ${COUNTS_DIR}
 
 
 # ==========================================
-# Step 1-3: 智能匹配 & 预处理 & 比对
+# Step 1-3: 高兼容性匹配模式 (支持 .fq.gz / .fastq.gz)
 # ==========================================
-echo "=== Step 1-3: 智能匹配模式 (针对 .raw.fastq.gz) ==="
+echo "=== Step 1-3: 正在扫描 ${RAW_DIR} 下的压缩文件 ==="
 
 shopt -s nullglob
 all_files=(${RAW_DIR}/*.gz)
@@ -80,29 +80,47 @@ if [ ${#all_files[@]} -gt 0 ]; then
     for r1_file in "${all_files[@]}"; do
         filename=$(basename "${r1_file}")
 
-        if [[ "$filename" =~ \.R2\.raw\.fastq\.gz$ ]]; then continue; fi
+        # 1. 过滤掉所有 R2 标识的文件，确保循环只从 R1 开始
+        # 兼容匹配: _2.gz, _R2.gz, .R2.gz, _2.fastq.gz 等
+        if [[ "$filename" =~ ([_.]R2[_.]|[_.]2\.) ]]; then
+            continue
+        fi
 
-        if [[ "$filename" =~ \.R1\.raw\.fastq\.gz$ ]]; then
-            r2_filename="${filename/.R1.raw.fastq.gz/.R2.raw.fastq.gz}"
-            sample_name=$(echo "$filename" | sed 's/\.R1\.raw\.fastq\.gz//')
+        # 2. 核心正则匹配：支持多种 R1 标识和多种后缀名
+        # 捕获组说明:
+        # ^(.+)            -> ${BASH_REMATCH[1]}: 样本名 (如 SRR21106098)
+        # (_1|_R1|\.R1|\.1) -> ${BASH_REMATCH[2]}: R1 标识符
+        # (\.f.*)?         -> ${BASH_REMATCH[3]}: 后缀部分 (如 .fastq, .fq, .raw 等，可选)
+        # \.gz$            -> 结尾必须是 .gz
+        if [[ "$filename" =~ ^(.+)(_1|_R1|\.R1|\.1)(\.f[^.]*)?\.gz$ ]]; then
+            sample_name="${BASH_REMATCH[1]}"
+            r1_id="${BASH_REMATCH[2]}"
+            extension="${BASH_REMATCH[3]}"
+            
+            # 将 R1 标识符中的 '1' 替换为 '2' 来推导 R2 文件名
+            r2_id=$(echo "$r1_id" | sed 's/1/2/')
+            r2_filename="${sample_name}${r2_id}${extension}.gz"
+            r2_file="${RAW_DIR}/${r2_filename}"
         else
+            # 如果不是常规的测序数据命名格式，则跳过
             continue
         fi
 
-        r2_file="${RAW_DIR}/${r2_filename}"
+        # 3. 检查推导出的 R2 文件是否存在
         if [ ! -f "$r2_file" ]; then
-            echo "❌ [报错] 样本 $sample_name 缺少 R2，跳过。"
+            echo "⚠️ [警告] 发现 R1 但未找到对应 R2: $filename (预期 R2: $r2_filename)"
             continue
         fi
 
+        # 4. 检查断点续跑：比对是否已完成
         if [ -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
-            echo "✅ [跳过] ${sample_name} 比对已完成。"
+            echo "✅ [跳过] ${sample_name} 已完成比对。"
             continue
         fi
 
-        echo ">>> 正在处理: ${sample_name} <<<"
+        echo ">>> 🚀 正在处理样本: ${sample_name} (格式: ${extension}.gz) <<<"
 
-        # [1/3] Fastp
+        # [1/3] Fastp 质控
         if [ ! -f "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" ]; then
             fastp -i "${r1_file}" -I "${r2_file}" \
                   -o "${TRIM_DIR}/${sample_name}_1.clean.fq.gz" \
@@ -112,7 +130,7 @@ if [ ${#all_files[@]} -gt 0 ]; then
                   --thread ${LOW_THREADS} --detect_adapter_for_pe --length_required 25 2> /dev/null
         fi
 
-        # [2/3] Bowtie2
+        # [2/3] Bowtie2 去除 rRNA
         if [ ! -f "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" ]; then
             if ls "${RRNA_INDEX}"*.bt2* &> /dev/null; then
                 bowtie2 -p ${HIGH_THREADS} --very-fast-local --no-unal -x "${RRNA_INDEX}" \
@@ -120,12 +138,13 @@ if [ ${#all_files[@]} -gt 0 ]; then
                         -2 "${TRIM_DIR}/${sample_name}_2.clean.fq.gz" \
                         --un-conc-gz "${CLEAN_DIR}/${sample_name}_clean" > /dev/null 2>&1
                 
+                # 处理 bowtie2 输出的带后缀文件名
                 mv "${CLEAN_DIR}/${sample_name}_clean.1" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.1.gz" "${CLEAN_DIR}/${sample_name}_1.final.fq.gz"
                 mv "${CLEAN_DIR}/${sample_name}_clean.2" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" 2>/dev/null || mv "${CLEAN_DIR}/${sample_name}_clean.2.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz"
             fi
         fi
 
-        # [3/3] STAR
+        # [3/3] STAR 比对
         if [ ! -f "${ALIGN_DIR}/${sample_name}.Aligned.sortedByCoord.out.bam" ]; then
             STAR --runThreadN ${HIGH_THREADS} --genomeDir "${STAR_INDEX}" \
                  --readFilesIn "${CLEAN_DIR}/${sample_name}_1.final.fq.gz" "${CLEAN_DIR}/${sample_name}_2.final.fq.gz" \
