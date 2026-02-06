@@ -1,7 +1,7 @@
 # ==============================================================================
 # Phf20 TElocal 专用 CPM 计算脚本
 # ==============================================================================
-setwd('/mnt/windowsdata/qiuzerui/Phf20-26.1.23/')
+setwd('/mnt/disk1/qiuzerui/downloads/Phf8_GSE212779')
 library(data.table)
 library(dplyr)
 library(rtracklayer)
@@ -9,8 +9,8 @@ library(rtracklayer)
 # ==============================
 # 1. 路径设置
 # ==============================
-input_file  <- "Phf20_1.23_TElocal_locus_counts.csv"
-output_file <- "Phf20_1.23_TElocal_CPM_Calculated.csv"
+input_file  <- "Phf8_GSE212779_TElocal_locus_counts.csv"
+output_file <- "Phf8_GSE212779_TElocal_locus_CPM.csv"
 
 # 基因注释路径（用于将 ENSG 转换成 Symbol）
 gene_gtf_path <- "/mnt/windowsdata/qiuzerui/RNAannotations/annotationMv38/gencode.vM38.annotation_PRI.gtf"
@@ -84,8 +84,8 @@ message("2. 新增的 _CPM 后缀列")
 message("3. 基因 Symbol 注释列")
 message("========================================================")
 # ==============================================================================
-# TElocal 差异分析脚本 (针对 4层 ID 格式适配)
-# 格式：locus:subfamily:family:class
+# TElocal 差异分析脚本 (灵活样本量与顺序版)
+# 格式要求：RepeatID 为 locus:subfamily:family:class
 # ==============================================================================
 
 library(data.table)
@@ -93,19 +93,34 @@ library(dplyr)
 library(tidyr)
 library(stringr)
 
-# --- 1. 设置输入输出文件 ---
-input_cpm <- "Phf20_1.23_TElocal_CPM_Calculated.csv"
-output_te_stats <- "Phf20_1.23_TElocal_Stats_Clean.csv"
+# --- 1. 设置路径与手动分组变量 ---
+input_cpm       <- "Phf8_GSE212779_TElocal_locus_CPM.csv"
+output_te_stats <- "Phf8_GSE212779_TElocal_locus_CPM_FC.csv"
 
-message(paste0("[", Sys.time(), "] 正在读取 CPM 文件..."))
+# 【核心配置】：在此处直接列出所有样本的完整列名
+# 脚本会自动识别样本量（不论是 2x2, 3x3 还是更多）
+ctrl_samples  <- c("SRR21106101_CPM", "SRR21106102_CPM", "SRR21106103_CPM")
+treat_samples <- c("SRR21106098_CPM", "SRR21106099_CPM", "SRR21106100_CPM")
+
+# --- 2. 读取数据与验证 ---
+message(paste0("[", Sys.time(), "] 正在读取数据并验证样本名..."))
 df <- fread(input_cpm)
 
-# --- 2. 筛选并拆分 TE ID (4层架构) ---
-# TElocal locus ID 包含 3 个冒号 (连接 4 个部分)
-df_te <- df[stringr::str_count(df$RepeatID, ":") == 3, ]
-message(paste0("   - 筛选出 TE 数量: ", nrow(df_te)))
+# 合并所有需要计算的列
+all_specified_cols <- c(ctrl_samples, treat_samples)
 
-# 核心修改：精准拆分为 4 列
+# 自动检查列名是否存在，防止拼写错误
+missing_cols <- setdiff(all_specified_cols, names(df))
+if (length(missing_cols) > 0) {
+  stop(paste("❌ 错误：在 CSV 中找不到以下列名，请检查拼写或后缀：\n", 
+             paste(missing_cols, collapse = ", ")))
+}
+
+# --- 3. 筛选并拆分 TE ID (4层架构) ---
+# TElocal locus 模式包含 3 个冒号 (locus:sub:fam:class)
+df_te <- df[stringr::str_count(df$RepeatID, ":") == 3, ]
+message(paste0("   - 筛选出有效 TE 数量: ", nrow(df_te)))
+
 df_te <- df_te %>%
   separate(RepeatID, 
            into = c("Locus", "SubFamily", "Family", "Class"), 
@@ -114,24 +129,19 @@ df_te <- df_te %>%
            extra = "merge") %>%
   as.data.frame()
 
-# --- 3. 定义 CPM 列名 (确认包含 _CPM 后缀) ---
-ctrl_cpm_cols  <- c("L1MKL2609676-Scr_1_Mixt_CPM", "L1MKL2609677-Scr_2_Mixt_CPM")
-treat_cpm_cols <- c("L1MKL2609678-Phf20_1_Mixt_CPM", "L1MKL2609679-Phf20_2_Mixt_CPM")
-all_cpm_cols   <- c(ctrl_cpm_cols, treat_cpm_cols)
-
 # --- 4. 数据类型安全转换 ---
-# 确保所有计算列均为数值型，防止 character 导致的 sum() 或 t.test() 报错
-for(col in all_cpm_cols) {
+# 强制将选定列转为数值型，防止计算报错
+for(col in all_specified_cols) {
   df_te[[col]] <- as.numeric(df_te[[col]])
 }
-df_te[all_cpm_cols][is.na(df_te[all_cpm_cols])] <- 0
+df_te[all_specified_cols][is.na(df_te[all_specified_cols])] <- 0
 
 # --- 5. 计算 Log2FC ---
-# 使用公式：$$Log_2FC = \log_2(\frac{\text{Mean}_{Treat} + \epsilon}{\text{Mean}_{Ctrl} + \epsilon})$$
+# 公式：$$Log_2FC = \log_2(\frac{\text{Mean}_{Treat} + \epsilon}{\text{Mean}_{Ctrl} + \epsilon})$$
 message(paste0("[", Sys.time(), "] 正在计算 Log2FC..."))
 pseudo <- 0.01
-mean_ctrl  <- rowMeans(as.matrix(df_te[, ctrl_cpm_cols]), na.rm = TRUE)
-mean_treat <- rowMeans(as.matrix(df_te[, treat_cpm_cols]), na.rm = TRUE)
+mean_ctrl  <- rowMeans(as.matrix(df_te[, ctrl_samples]), na.rm = TRUE)
+mean_treat <- rowMeans(as.matrix(df_te[, treat_samples]), na.rm = TRUE)
 
 df_te$Log2FC <- round(log2(mean_treat + pseudo) - log2(mean_ctrl + pseudo), 4)
 
@@ -142,28 +152,27 @@ calc_pval_te <- function(x, c_cols, t_cols) {
   v_c <- as.numeric(x[c_cols])
   v_t <- as.numeric(x[t_cols])
   
+  # 如果两组内部方差均为0（数值完全相同），直接返回 1 避免 T-test 报错
   if (var(v_c) == 0 && var(v_t) == 0) return(1)
   
   tryCatch({
-    # var.equal = TRUE 使用标准学生 t 检验
+    # 使用标准 Student's t-test
     res <- t.test(v_t, v_c, var.equal = TRUE)
     return(res$p.value)
   }, error = function(e) return(NA_real_))
 }
 
-# 190 核环境下 apply 处理几万行 TE 数据非常迅速
+# 动态传入识别到的列名
 df_te$PValue <- apply(df_te, 1, calc_pval_te, 
-                      c_cols = ctrl_cpm_cols, 
-                      t_cols = treat_cpm_cols)
+                      c_cols = ctrl_samples, 
+                      t_cols = treat_samples)
 
 df_te$PValue <- round(as.numeric(df_te$PValue), 5)
 
 # --- 7. 整理输出结果 ---
-# 保留四个分类层级 + 统计值 + 原始 CPM
-final_cols <- c("Locus", "SubFamily", "Family", "Class", "Log2FC", "PValue", all_cpm_cols)
+# 保留四层分类、统计指标及原始 CPM 数据
+final_cols <- c("Locus", "SubFamily", "Family", "Class", "Log2FC", "PValue", all_specified_cols)
 df_final <- df_te %>% select(all_of(final_cols))
 
-message(paste(">>> 正在导出统计文件:", output_te_stats))
 write.csv(df_final, output_te_stats, row.names = FALSE)
-
-message("✅ 分析完成！四个分类层级已全部解析。")
+message("✅ 全部完成！已处理 ", length(ctrl_samples), " 个对照 vs ", length(treat_samples), " 个实验样本。")
