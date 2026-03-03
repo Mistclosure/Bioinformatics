@@ -1,0 +1,158 @@
+#fig1----
+#data----
+setwd("/mnt/disk1/qiuzerui/downloads/Rloop/GSE131907")
+library(data.table)
+library(Seurat)
+library(stringr)
+library(magrittr)
+library(harmony) 
+library(celldex)
+UMI = fread("GSE131907_Lung_Cancer_raw_UMI_matrix.txt",data.table = F)
+rownames(UMI) = UMI[,1]
+UMI = UMI[,-1]
+scRNA = CreateSeuratObject(UMI, min.cells = 3, project =
+                             "GSE131907",min.features =300)
+ann = read.table("GSE131907_Lung_Cancer_cell_annotation.txt", header=T,
+                 sep="\t", check.names=F, row.names=1)
+ann = ann[colnames(scRNA),]
+scRNA@meta.data$Sample = ann$Sample
+meta = scRNA@meta.data
+id = meta[meta$Sample=="LUNG_T09" | meta$Sample=="LUNG_T08" |
+            meta$Sample=="LUNG_T25" | meta$Sample=="LUNG_T06" |
+            meta$Sample=="LUNG_T34" | meta$Sample=="LUNG_T31" |
+            meta$Sample=="LUNG_T19" | meta$Sample=="LUNG_T20" |
+            meta$Sample=="LUNG_T18" | meta$Sample=="LUNG_T28" |
+            meta$Sample=="NS_06" | meta$Sample=="NS_16" |
+            meta$Sample=="NS_02" | meta$Sample=="NS_19" |
+            meta$Sample=="NS_17" | meta$Sample=="NS_04" |
+            meta$Sample=="NS_13" | meta$Sample=="NS_03" |
+            meta$Sample=="NS_12" | meta$Sample=="NS_07" |
+            meta$Sample=="LUNG_T30",]
+scRNA1 = scRNA[,rownames(id)]
+save(scRNA1,file='scRNA1.Rdata')
+setwd("/mnt/disk1/qiuzerui/downloads/Rloop/GSE123904/GSE123904_RAW/")
+samples=list.files("./")
+samples
+dir <- file.path('./',samples)
+names(dir) <- samples
+names(dir)=str_split(names(dir),'_',simplify = T)[,3]
+scRNAlist <- list()
+for(i in 1:length(dir)){
+  A = fread(dir[i])
+  A = as.data.frame(A)
+  rownames(A) = A[,1]
+  A = as.data.frame(t(A[,-1]))
+  scRNAlist[[i]] <- CreateSeuratObject(A, min.cells = 3, project =
+                                         names(dir)[i],min.features =300)
+}
+scRNA2 <- merge(scRNAlist[[1]], y=c(scRNAlist[[2]],
+                                    scRNAlist[[3]],scRNAlist[[4]],scRNAlist[[5]],
+                                    scRNAlist[[6]],scRNAlist[[7]],scRNAlist[[8]],scRNAlist[[9]]))
+scRNA = merge(scRNA1,y=scRNA2)
+### SCT
+scRNA <- SCTransform(scRNA)
+### PCA
+scRNA <- RunPCA(scRNA, npcs=50, verbose=FALSE)
+scRNA <- RunHarmony(scRNA, group.by.vars="orig.ident", max.iter.harmony =
+                      20,assay.use = "SCT")
+pc.num=1:30
+scRNA <- RunTSNE(scRNA, reduction="harmony", dims=pc.num) %>%
+  RunUMAP(reduction="harmony", dims=pc.num)
+scRNA <- FindNeighbors(scRNA, dims = pc.num)
+scRNA <- FindClusters(scRNA, resolution = 1.5)
+table(scRNA@meta.data$seurat_clusters)
+library(SingleR)
+library(celldex)
+
+# 对于肺癌，通常推荐使用 Human Primary Cell Atlas (HPCA) 或 BlueprintEncode
+# 1. 下载参考数据集
+refdata <- HumanPrimaryCellAtlasData()
+# 1. 定义 testdata：在 v5 中使用 'layer' 取代 'slot'
+# 注意：对于 SCTransform 处理后的数据，归一化矩阵存储在 'data' 图层
+testdata <- GetAssayData(scRNA, assay = "SCT", layer = "data")
+
+# 2. 定义 clusters：获取聚类结果 (这一步语法与 v4 保持一致)
+# 但建议显式指定，确保获取的是最新的聚类列
+clusters <- scRNA@meta.data$seurat_clusters
+cellpred <- SingleR(test = testdata, ref = refdata, labels =
+                      refdata$label.main,
+                     clusters = clusters,
+                    assay.type.test = "logcounts", assay.type.ref =
+                      "logcounts")
+celltype = data.frame(ClusterID=rownames(cellpred),
+                      celltype=cellpred$labels, stringsAsFactors = FALSE)
+scRNA@meta.data$singleR=celltype[match(clusters,celltype$ClusterID),'celltype']
+save(scRNA,file='scRNA.Rdata')
+
+
+#A----缺少cli分组信息，搁置！！！！
+library(ComplexHeatmap)
+library(circlize)
+cli=read.table("Cli.txt",sep="\t",header=T,check.names=F,row.names = 1)
+value = rnorm(19)
+cli = cli[,-1]
+colnames(cli)
+ha = HeatmapAnnotation(df = cli,
+                       col = list(
+                         `Data Source` = c("GSE131907" = "#E69394" ,
+                                           "GSE123904" = "#BEBADA"),
+                         `Sample Origins` = c("Primary" = "#B3E2CD" ,
+                                              "Distant Metastasis" = "#E4D4B7", "Chemotherapy" = "#ECCFC0"),
+                         Smoking = c("Never smoker" = "#2DB600","Current
+smoker" = "#EDB48E", "Former smoker" = "#E6E600"),
+                         EGFR = c("WT" = "#7FC97F", "Mut" = "#FDC086",
+                                  "na" = "#A9B7B7"),
+                         KRAS = c("WT" = "#7FC97F", "Mut" = "#FDC086",
+                                  "na" = "#A9B7B7"),
+                         TP53 = c("WT" = "#7FC97F", "Mut" = "#FDC086",
+                                  "na" = "#A9B7B7"),
+                         Stage = c("Stage I" = "#EFF3FF", "Stage II" =
+                                     "#B8D4E6", "Stage III" = "#64A9D3", "Stage IV" = "#2A7AB7")
+                       ))
+draw(ha)meat=read.table("Paint_Malignant cells.txt", header=T, sep="\t",
+                        check.names=F)
+meat$x <- factor(meat$id,levels=c("P1","P2","P3","P4","P5",
+                                  "P6","P7","P8","P9","P10",
+                                  "P11","P12","P13","P14","P15",
+                                  "P16","P17","M1","M2","M3",
+                                  "M4","M5","M6","M7","M8",
+                                  "M9","M10","C1","C2","C3"))
+meat$number = log2(meat$number+1)
+ggplot(meat, aes(x=x, y=number, group = 1)) +
+  geom_line(size=2,color="#CBD5E8")+
+  geom_point(size=3)+
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(x="",y="log2(Malignant Cell Number)")+
+  theme(panel.grid.major =element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank())
+meta = scRNA@meta.data
+meta = meta[,c(1,10)]
+for (i in 1:nrow(meat)) {
+  x = meat[i,1]
+  y = meat[i,2]
+  meta$orig.ident[which(meta$orig.ident == y)] <- x
+}
+meta$x <- factor(meta$orig.ident,levels=c("P1","P2","P3","P4","P5",
+                                          "P6","P7","P8","P9","P10",
+                                          "P11","P12","P13","P14","P15",
+                                          "P16","P17","M1","M2","M3",
+                                          "M4","M5","M6","M7","M8",
+                                          "M9","M10","C1","C2","C3"))
+ggplot(data = meta, aes(x = x, fill =singleR1))+
+  geom_bar(stat = 'count',position = 'fill')+labs(y = "Cell
+Proportion(%)" , x="")+
+  scale_fill_manual(values = c( "#80B1D3","#BC80BD" , "#FB8072"
+                                ,"#8DD3C7", "#FFFFB3",
+                                "#FDB462" ,"#D9D9D9","#FCCDE5",
+                                "#BABADA","#B3DE69"))+
+  theme(axis.text.x = element_text(angle = 90))+
+  theme(panel.grid.major =element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank())
+
+#B----
+DimPlot(scRNA, group.by="singleR", label.size=5, reduction='umap')
+DimPlot(scRNA, group.by="orig.ident", label.size=5, reduction='umap')
