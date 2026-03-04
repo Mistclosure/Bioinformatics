@@ -93,6 +93,64 @@ scRNA@meta.data$singleR=celltype[match(clusters,celltype$ClusterID),'celltype']
 setwd('/mnt/disk1/qiuzerui/downloads/Rloop')
 save(scRNA,file='scRNA.Rdata')
 
+#计算Malignant cells
+# 1. 加载所需的包
+library(copykat)
+library(dplyr)
+
+# 2. 提取上皮细胞亚集 (显著降低计算量并提高准确率)
+# 注意：HPCA 参考库里上皮细胞的标签通常是 "Epithelial_cells"
+# 你可以先用 table(scRNA$singleR) 确认一下具体的拼写
+epi_cells <- subset(scRNA, subset = singleR == "Epithelial_cells")
+
+# 确保 Layers 已经合并，以提取完整的原始 counts 矩阵
+epi_cells <- JoinLayers(epi_cells, assay = "RNA")
+raw_counts <- GetAssayData(epi_cells, assay = "RNA", layer = "counts")
+
+# 3. 运行 CopyKAT
+# 警告：这一步依然需要一段时间（可能几个小时），建议在 tmux 或 screen 后台运行
+copykat.res <- copykat(
+  rawmat = as.matrix(raw_counts), 
+  id.type = "S",           # "S" 代表基因符号 (Symbol)，即你矩阵里的基因名
+  ngene.chr = 5,           # 每条染色体至少保留的基因数
+  win.size = 25,           # 窗口大小
+  KS.cut = 0.1,            # 判定非整倍体的严格程度，0.1 是保守推荐值
+  sam.name = "lung_cancer", 
+  distance = "euclidean", 
+  n.cores = 64              # 请根据你服务器的 CPU 核心数进行调整，越大越快
+)
+
+# 4. 提取预测结果并筛选恶性细胞 (非整倍体 Aneuploid)
+pred <- as.data.frame(copykat.res$prediction)
+# 获取被鉴定为恶性细胞的 barcode (细胞名)
+malignant_barcodes <- pred$cell.names[pred$copykat.pred == "aneuploid"]
+
+# 5. 统计每个样本的恶性细胞数量
+# 从 Seurat 对象中提取这些恶性细胞的元数据
+malignant_meta <- scRNA@meta.data[malignant_barcodes, ]
+
+# 统计每个新 ID (P1, P2, M1...) 的细胞数量
+malig_counts <- as.data.frame(table(malignant_meta$orig.ident))
+colnames(malig_counts) <- c("id", "number")
+
+# 6. 拼装符合原作者代码要求的表格格式
+# 原代码要求：第一列是简化 ID(P1), 第二列是原始 ID(LUNG_T09), 第三列是数目(number)
+# 我们读取你之前整理的 Cli.csv 来获取原始 ID
+cli_full <- read.csv("Cli.csv", header = TRUE)
+
+# 将原始 ID 合并进统计结果表
+meat <- merge(malig_counts, cli_full[, c("ID", "Original_Sample_ID")], 
+              by.x = "id", by.y = "ID", all.x = TRUE)
+
+# 严格调整列顺序为：id, Original_Sample_ID, number
+meat <- meat[, c("id", "Original_Sample_ID", "number")]
+
+# 7. 保存为 txt 文件
+write.table(meat, file = "Paint_Malignant cells.txt", 
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+print("恶性细胞统计文件已生成完毕！")
+
 
 #A----
 library(ComplexHeatmap)
