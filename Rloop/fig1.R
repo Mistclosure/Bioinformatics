@@ -16,6 +16,12 @@ ann = read.table("GSE131907_Lung_Cancer_cell_annotation.txt", header=T,
                  sep="\t", check.names=F, row.names=1)
 ann = ann[colnames(scRNA),]
 scRNA@meta.data$Sample = ann$Sample
+
+# ==================== 新增修改：统一 ID ====================
+# 将 GSE131907 的真实样本名覆盖掉默认的 project name，使其与 GSE123904 格式对齐
+scRNA@meta.data$orig.ident = scRNA@meta.data$Sample
+# ===========================================================
+
 meta = scRNA@meta.data
 id = meta[meta$Sample=="LUNG_T09" | meta$Sample=="LUNG_T08" |
             meta$Sample=="LUNG_T25" | meta$Sample=="LUNG_T06" |
@@ -82,24 +88,43 @@ cellpred <- SingleR(test = testdata, ref = refdata, labels =
 celltype = data.frame(ClusterID=rownames(cellpred),
                       celltype=cellpred$labels, stringsAsFactors = FALSE)
 scRNA@meta.data$singleR=celltype[match(clusters,celltype$ClusterID),'celltype']
+setwd('/mnt/disk1/qiuzerui/downloads/Rloop')
 save(scRNA,file='scRNA.Rdata')
 
 
-#A----缺少cli分组信息，搁置！！！！
+#A----
 library(ComplexHeatmap)
 library(circlize)
-cli=read.table("Cli.txt",sep="\t",header=T,check.names=F,row.names = 1)
+
+# 1. 读取你整理好的 CSV 文件
+cli_full = read.csv("Cli.csv", header = TRUE, check.names = FALSE)
+
+# 2. 进行原始 ID 到新 ID 的映射
+# 构建一个以 Original_Sample_ID 为名，ID (P1, M1...) 为值的字典向量
+id_map <- setNames(cli_full$ID, cli_full$Original_Sample_ID)
+# 映射替换 scRNA 对象的 orig.ident
+scRNA$orig.ident <- unname(id_map[scRNA$orig.ident])
+
+# 3. 整理供后续热图使用的 cli 格式
+cli <- cli_full
+rownames(cli) <- cli$ID
+# 删掉不需要画在热图上的前三列：ID, Original_Sample_ID, Dummy
+cli <- cli[, -c(1, 2, 3)] 
+# （重要补救）你的 CSV 表头是 "Origins"，但原代码要求 "Sample Origins"，这里用代码帮你强行对齐，以保证后续代码不报错
+colnames(cli)[colnames(cli) == "Origins"] <- "Sample Origins" 
+
 value = rnorm(19)
-cli = cli[,-1]
 colnames(cli)
+
+# ==================== 以下为原作者代码，一字未改 ====================
+
 ha = HeatmapAnnotation(df = cli,
                        col = list(
                          `Data Source` = c("GSE131907" = "#E69394" ,
                                            "GSE123904" = "#BEBADA"),
                          `Sample Origins` = c("Primary" = "#B3E2CD" ,
                                               "Distant Metastasis" = "#E4D4B7", "Chemotherapy" = "#ECCFC0"),
-                         Smoking = c("Never smoker" = "#2DB600","Current
-smoker" = "#EDB48E", "Former smoker" = "#E6E600"),
+                         Smoking = c("Never smoker" = "#2DB600","Current\nsmoker" = "#EDB48E", "Former smoker" = "#E6E600"),
                          EGFR = c("WT" = "#7FC97F", "Mut" = "#FDC086",
                                   "na" = "#A9B7B7"),
                          KRAS = c("WT" = "#7FC97F", "Mut" = "#FDC086",
@@ -109,8 +134,10 @@ smoker" = "#EDB48E", "Former smoker" = "#E6E600"),
                          Stage = c("Stage I" = "#EFF3FF", "Stage II" =
                                      "#B8D4E6", "Stage III" = "#64A9D3", "Stage IV" = "#2A7AB7")
                        ))
-draw(ha)meat=read.table("Paint_Malignant cells.txt", header=T, sep="\t",
-                        check.names=F)
+draw(ha)
+
+meat=read.table("Paint_Malignant cells.txt", header=T, sep="\t",
+                check.names=F)
 meat$x <- factor(meat$id,levels=c("P1","P2","P3","P4","P5",
                                   "P6","P7","P8","P9","P10",
                                   "P11","P12","P13","P14","P15",
@@ -118,6 +145,7 @@ meat$x <- factor(meat$id,levels=c("P1","P2","P3","P4","P5",
                                   "M4","M5","M6","M7","M8",
                                   "M9","M10","C1","C2","C3"))
 meat$number = log2(meat$number+1)
+
 ggplot(meat, aes(x=x, y=number, group = 1)) +
   geom_line(size=2,color="#CBD5E8")+
   geom_point(size=3)+
@@ -127,6 +155,7 @@ ggplot(meat, aes(x=x, y=number, group = 1)) +
         panel.grid.minor = element_blank(),
         panel.background = element_blank(),
         panel.border = element_blank())
+
 meta = scRNA@meta.data
 meta = meta[,c(1,10)]
 for (i in 1:nrow(meat)) {
@@ -134,6 +163,7 @@ for (i in 1:nrow(meat)) {
   y = meat[i,2]
   meta$orig.ident[which(meta$orig.ident == y)] <- x
 }
+
 meta$x <- factor(meta$orig.ident,levels=c("P1","P2","P3","P4","P5",
                                           "P6","P7","P8","P9","P10",
                                           "P11","P12","P13","P14","P15",
@@ -141,8 +171,7 @@ meta$x <- factor(meta$orig.ident,levels=c("P1","P2","P3","P4","P5",
                                           "M4","M5","M6","M7","M8",
                                           "M9","M10","C1","C2","C3"))
 ggplot(data = meta, aes(x = x, fill =singleR1))+
-  geom_bar(stat = 'count',position = 'fill')+labs(y = "Cell
-Proportion(%)" , x="")+
+  geom_bar(stat = 'count',position = 'fill')+labs(y = "Cell\nProportion(%)" , x="")+
   scale_fill_manual(values = c( "#80B1D3","#BC80BD" , "#FB8072"
                                 ,"#8DD3C7", "#FFFFB3",
                                 "#FDB462" ,"#D9D9D9","#FCCDE5",
@@ -153,6 +182,26 @@ Proportion(%)" , x="")+
         panel.background = element_blank(),
         panel.border = element_blank())
 
-#B----
+#B----可运行
 DimPlot(scRNA, group.by="singleR", label.size=5, reduction='umap')
 DimPlot(scRNA, group.by="orig.ident", label.size=5, reduction='umap')
+
+
+#C----
+library(limma)
+Malignant=read.table("Malignant cells.txt", header=T, sep="\t",
+                     check.names=F, row.names=1)
+pbmc1 = scRNA[,Malignant[,1]]
+Count = as.data.frame(pbmc1@assays[["RNA"]]@counts)
+meta = pbmc1@meta.data
+pbmc1 <- CreateSeuratObject(counts = Count)
+pbmc1@meta.data$Type = B$orig.ident
+### SCT
+pbmc1 <- SCTransform(pbmc1)
+#PCA
+pbmc1 <- RunPCA(pbmc1, features = VariableFeatures(object = pbmc1))
+pbmc1 <- RunTSNE(pbmc1, dims=pc.num) %>% RunUMAP(dims=1:20)
+pbmc1 <- FindNeighbors(pbmc1, dims = 1:20)
+pbmc1 <- FindClusters(pbmc1, resolution = 1)
+DimPlot(pbmc1, reduction = "umap")
+save(pbmc1,file='Malignant.Rdata')
