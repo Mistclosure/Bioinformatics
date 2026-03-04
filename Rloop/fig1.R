@@ -36,6 +36,8 @@ id = meta[meta$Sample=="LUNG_T09" | meta$Sample=="LUNG_T08" |
             meta$Sample=="LUNG_T30",]
 scRNA1 = scRNA[,rownames(id)]
 save(scRNA1,file='scRNA1.Rdata')
+
+
 setwd("/mnt/disk1/qiuzerui/downloads/Rloop/GSE123904/GSE123904_RAW/")
 samples=list.files("./")
 samples
@@ -124,7 +126,7 @@ ha = HeatmapAnnotation(df = cli,
                                            "GSE123904" = "#BEBADA"),
                          `Sample Origins` = c("Primary" = "#B3E2CD" ,
                                               "Distant Metastasis" = "#E4D4B7", "Chemotherapy" = "#ECCFC0"),
-                         Smoking = c("Never smoker" = "#2DB600","Current\nsmoker" = "#EDB48E", "Former smoker" = "#E6E600"),
+                         Smoking = c("Never smoker" = "#2DB600","Current\\nsmoker" = "#EDB48E", "Former smoker" = "#E6E600"),
                          EGFR = c("WT" = "#7FC97F", "Mut" = "#FDC086",
                                   "na" = "#A9B7B7"),
                          KRAS = c("WT" = "#7FC97F", "Mut" = "#FDC086",
