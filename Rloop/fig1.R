@@ -93,22 +93,25 @@ scRNA@meta.data$singleR=celltype[match(clusters,celltype$ClusterID),'celltype']
 setwd('/mnt/disk1/qiuzerui/downloads/Rloop')
 save(scRNA,file='scRNA.Rdata')
 
+load("scRNA.Rdata")
 #计算Malignant cells
 # 1. 加载所需的包
 library(copykat)
 library(dplyr)
+library(stringr) # 用于拆分字符串
 
-# 2. 提取上皮细胞亚集 (显著降低计算量并提高准确率)
-# 注意：HPCA 参考库里上皮细胞的标签通常是 "Epithelial_cells"
-# 你可以先用 table(scRNA$singleR) 确认一下具体的拼写
-epi_cells <- subset(scRNA, subset = singleR == "Epithelial_cells")
-
+# 2. 提取全部细胞矩阵，并拼接细胞名与分组 ID
 # 确保 Layers 已经合并，以提取完整的原始 counts 矩阵
-epi_cells <- JoinLayers(epi_cells, assay = "RNA")
-raw_counts <- GetAssayData(epi_cells, assay = "RNA", layer = "counts")
+scRNA <- JoinLayers(scRNA, assay = "RNA")
+raw_counts <- GetAssayData(scRNA, assay = "RNA", layer = "counts")
+
+# 【核心修改】将细胞名和 id (如 P10, C3) 拼接成新的细胞名
+# 使用 "___" (三个下划线) 作为分隔符，防止和原始细胞名中自带的单下划线冲突
+# 假设此时 scRNA$orig.ident 已经映射为了 P1, P2 等格式
+colnames(raw_counts) <- paste0(colnames(raw_counts), "___", scRNA$orig.ident)
 
 # 3. 运行 CopyKAT
-# 警告：这一步依然需要一段时间（可能几个小时），建议在 tmux 或 screen 后台运行
+# 警告：现在是全量 7.4 万细胞运行，极度消耗内存和时间！建议务必在后台运行
 copykat.res <- copykat(
   rawmat = as.matrix(raw_counts), 
   id.type = "S",           # "S" 代表基因符号 (Symbol)，即你矩阵里的基因名
@@ -117,44 +120,59 @@ copykat.res <- copykat(
   KS.cut = 0.1,            # 判定非整倍体的严格程度，0.1 是保守推荐值
   sam.name = "lung_cancer", 
   distance = "euclidean", 
-  n.cores = 64              # 请根据你服务器的 CPU 核心数进行调整，越大越快
+  n.cores = 16              # 请根据你服务器的 CPU 核心数进行调整，越大越快
 )
+save(copykat.res,file='copykat_res.Rdata')
 
+# ==================== 修改开始 ====================
 # 4. 提取预测结果并筛选恶性细胞 (非整倍体 Aneuploid)
 pred <- as.data.frame(copykat.res$prediction)
-# 获取被鉴定为恶性细胞的 barcode (细胞名)
-malignant_barcodes <- pred$cell.names[pred$copykat.pred == "aneuploid"]
+malignant_joined_names <- pred$cell.names[pred$copykat.pred == "aneuploid"]
 
-# 5. 统计每个样本的恶性细胞数量
-# 从 Seurat 对象中提取这些恶性细胞的元数据
-malignant_meta <- scRNA@meta.data[malignant_barcodes, ]
+# 5. 利用正则表达式将拼接的细胞名分开成两列 (原始 barcode 和 分组 ID)
+# 按照 "___" 分割，生成一个矩阵，第一列是原细胞名，第二列是 P1/C3 等 ID
+split_names <- str_split(malignant_joined_names, "___", simplify = TRUE)
+malig_barcodes <- split_names[, 1] # 真实的细胞 barcode
+malig_ids <- split_names[, 2]      # 分组 ID (P1, M1...)
 
-# 统计每个新 ID (P1, P2, M1...) 的细胞数量
-malig_counts <- as.data.frame(table(malignant_meta$orig.ident))
+# --- 任务 A: 统计每个 ID 的恶性细胞数量，生成 Paint_Malignant cells.txt ---
+malig_counts <- as.data.frame(table(malig_ids))
 colnames(malig_counts) <- c("id", "number")
 
-# 6. 拼装符合原作者代码要求的表格格式
-# 原代码要求：第一列是简化 ID(P1), 第二列是原始 ID(LUNG_T09), 第三列是数目(number)
-# 我们读取你之前整理的 Cli.csv 来获取原始 ID
+# 读取你的 Cli.csv (包含 ID 和 Original_Sample_ID)
 cli_full <- read.csv("Cli.csv", header = TRUE)
 
-# 将原始 ID 合并进统计结果表
-meat <- merge(malig_counts, cli_full[, c("ID", "Original_Sample_ID")], 
-              by.x = "id", by.y = "ID", all.x = TRUE)
+# 通过 id (P1, M1) 将统计结果合并进表格，保证所有临床样本都在
+meat <- merge(cli_full[, c("ID", "Original_Sample_ID")], malig_counts, 
+              by.x = "ID", by.y = "id", all.x = TRUE)
 
-# 严格调整列顺序为：id, Original_Sample_ID, number
-meat <- meat[, c("id", "Original_Sample_ID", "number")]
+# 把因没检测到恶性细胞而产生的 NA 替换为 0 (严谨补丁)
+meat$number[is.na(meat$number)] <- 0
 
-# 7. 保存为 txt 文件
+# 严格调整列顺序为：id, Original_Sample_ID, number (并将 ID 重命名为 id)
+meat <- meat[, c("ID", "Original_Sample_ID", "number")]
+colnames(meat)[1] <- "id"
+
+# 保存 A 部分所需文件
 write.table(meat, file = "Paint_Malignant cells.txt", 
             sep = "\t", quote = FALSE, row.names = FALSE)
+print("恶性细胞统计文件 (Paint_Malignant cells.txt) 已生成完毕！")
 
-print("恶性细胞统计文件已生成完毕！")
+# --- 任务 B: 提取全部恶性细胞，生成 C 部分所需的 Malignant cells.txt ---
+# 根据 C 部分代码 `Malignant=read.table(..., row.names=1)` 和 `scRNA[,Malignant[,1]]`
+# 说明该 txt 文件需要有行名，且第一数据列必须是细胞 barcode
+malig_df <- data.frame(Barcode = malig_barcodes, row.names = malig_barcodes)
 
+# 保存 C 部分所需文件
+write.table(malig_df, file = "Malignant cells.txt", 
+            sep = "\t", quote = FALSE, col.names = TRUE)
+print("恶性细胞列表文件 (Malignant cells.txt) 已生成完毕！")
+# ==================== 修改结束 ====================
 
 #A----
 library(ComplexHeatmap)
 library(circlize)
+library(ggplot2)
 
 # 1. 读取你整理好的 CSV 文件
 cli_full = read.csv("Cli.csv", header = TRUE, check.names = FALSE)
@@ -243,6 +261,14 @@ ggplot(data = meta, aes(x = x, fill =singleR1))+
         panel.border = element_blank())
 
 #B----可运行
+scRNA$orig.ident <- factor(scRNA$orig.ident,levels=c("C1","C2","C3",
+                                                     "M1","M2","M3",
+                                                     "M4","M5","M6","M7","M8",
+                                                     "M9","M10",
+                                                     "P1","P2","P3","P4","P5",
+                                                     "P6","P7","P8","P9","P10",
+                                                     "P11","P12","P13","P14","P15",
+                                                     "P16","P17"))
 DimPlot(scRNA, group.by="singleR", label.size=5, reduction='umap')
 DimPlot(scRNA, group.by="orig.ident", label.size=5, reduction='umap')
 
