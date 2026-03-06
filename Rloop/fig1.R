@@ -94,7 +94,6 @@ setwd('/mnt/disk1/qiuzerui/downloads/Rloop')
 save(scRNA,file='scRNA.Rdata')
 
 load("scRNA.Rdata")
-#计算Malignant cells
 # 1. 加载所需的包
 library(copykat)
 library(dplyr)
@@ -105,32 +104,66 @@ library(stringr) # 用于拆分字符串
 scRNA <- JoinLayers(scRNA, assay = "RNA")
 raw_counts <- GetAssayData(scRNA, assay = "RNA", layer = "counts")
 
-# 【核心修改】将细胞名和 id (如 P10, C3) 拼接成新的细胞名
-# 使用 "___" (三个下划线) 作为分隔符，防止和原始细胞名中自带的单下划线冲突
-# 假设此时 scRNA$orig.ident 已经映射为了 P1, P2 等格式
+# 将细胞名和 id (如 P10, C3) 拼接成新的细胞名
 colnames(raw_counts) <- paste0(colnames(raw_counts), "___", scRNA$orig.ident)
 
-# 3. 运行 CopyKAT
-# 警告：现在是全量 7.4 万细胞运行，极度消耗内存和时间！建议务必在后台运行
-copykat.res <- copykat(
-  rawmat = as.matrix(raw_counts), 
-  id.type = "S",           # "S" 代表基因符号 (Symbol)，即你矩阵里的基因名
-  ngene.chr = 5,           # 每条染色体至少保留的基因数
-  win.size = 25,           # 窗口大小
-  KS.cut = 0.1,            # 判定非整倍体的严格程度，0.1 是保守推荐值
-  sam.name = "lung_cancer", 
-  distance = "euclidean", 
-  n.cores = 16              # 请根据你服务器的 CPU 核心数进行调整，越大越快
-)
-save(copykat.res,file='copykat_res.Rdata')
 
-# ==================== 修改开始 ====================
+# ==================== 新增：分两组运行与合并的核心代码 ====================
+
+# 获取所有细胞名并设置随机种子进行打乱 
+# (随机打乱是为了保证分出的这 2 组中，每一组都有混合的正常细胞作为对照)
+set.seed(42) 
+all_cells <- sample(colnames(raw_counts))
+
+# 将打乱后的细胞列名均分为 2 组
+cell_groups <- split(all_cells, cut(seq_along(all_cells), 2, labels = FALSE))
+
+# 初始化一个空列表，用于存放两组的预测结果
+pred_list <- list()
+
+# 循环运行 2 次 CopyKAT
+for (i in 1:2) {
+  print(paste0("========== 正在运行第 ", i, " 组 (共 2 组) =========="))
+  
+  # 提取当前组的表达矩阵
+  sub_counts <- raw_counts[, cell_groups[[i]]]
+  
+  # 运行 CopyKAT
+  sub_copykat_res <- copykat(
+    rawmat = as.matrix(sub_counts), 
+    id.type = "S",            
+    ngene.chr = 5,            
+    win.size = 25,            
+    KS.cut = 0.1,             
+    sam.name = paste0("lung_cancer_part", i), # 区分输出文件前缀，避免覆盖
+    distance = "euclidean", 
+    n.cores = 16               
+  )
+  
+  # 提取当前组的预测结果并存入列表
+  pred_list[[i]] <- as.data.frame(sub_copykat_res$prediction)
+  
+  # 主动释放内存，防止后续循环爆内存
+  rm(sub_counts, sub_copykat_res)
+  gc()
+}
+
+print("========== 两组运行完毕，正在合并预测结果 ==========")
+
+# 将 2 组的预测结果按行合并为一个完整的数据框
+pred <- do.call(rbind, pred_list)
+# 保存合并后的预测结果以防万一
+save(pred, file = 'copykat_merged_pred.Rdata')
+
+# ==================== 新增结束 ====================
+
+
+# ==================== 以下为未修改的原始代码 ====================
 # 4. 提取预测结果并筛选恶性细胞 (非整倍体 Aneuploid)
-pred <- as.data.frame(copykat.res$prediction)
+# 注意：此时的 pred 已经是完整合并后的数据了，代码无缝衔接
 malignant_joined_names <- pred$cell.names[pred$copykat.pred == "aneuploid"]
 
 # 5. 利用正则表达式将拼接的细胞名分开成两列 (原始 barcode 和 分组 ID)
-# 按照 "___" 分割，生成一个矩阵，第一列是原细胞名，第二列是 P1/C3 等 ID
 split_names <- str_split(malignant_joined_names, "___", simplify = TRUE)
 malig_barcodes <- split_names[, 1] # 真实的细胞 barcode
 malig_ids <- split_names[, 2]      # 分组 ID (P1, M1...)
@@ -159,15 +192,12 @@ write.table(meat, file = "Paint_Malignant cells.txt",
 print("恶性细胞统计文件 (Paint_Malignant cells.txt) 已生成完毕！")
 
 # --- 任务 B: 提取全部恶性细胞，生成 C 部分所需的 Malignant cells.txt ---
-# 根据 C 部分代码 `Malignant=read.table(..., row.names=1)` 和 `scRNA[,Malignant[,1]]`
-# 说明该 txt 文件需要有行名，且第一数据列必须是细胞 barcode
 malig_df <- data.frame(Barcode = malig_barcodes, row.names = malig_barcodes)
 
 # 保存 C 部分所需文件
 write.table(malig_df, file = "Malignant cells.txt", 
             sep = "\t", quote = FALSE, col.names = TRUE)
 print("恶性细胞列表文件 (Malignant cells.txt) 已生成完毕！")
-# ==================== 修改结束 ====================
 
 #A----
 library(ComplexHeatmap)
