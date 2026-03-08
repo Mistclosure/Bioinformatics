@@ -179,7 +179,7 @@ cli_full <- read.csv("Cli.csv", header = TRUE)
 
 # 通过 id (P1, M1) 将统计结果合并进表格，保证所有临床样本都在
 meat <- merge(cli_full[, c("ID", "Original_Sample_ID")], malig_counts, 
-              by.x = "ID", by.y = "id", all.x = TRUE)
+              by.x = "Original_Sample_ID", by.y = "id", all.x = TRUE)
 
 # 把因没检测到恶性细胞而产生的 NA 替换为 0 (严谨补丁)
 meat$number[is.na(meat$number)] <- 0
@@ -209,6 +209,7 @@ library(ggplot2)
 # 1. 读取你整理好的 CSV 文件
 cli_full = read.csv("Cli.csv", header = TRUE, check.names = FALSE)
 
+##此步不要重复运行，否则会出错
 # 2. 进行原始 ID 到新 ID 的映射
 # 构建一个以 Original_Sample_ID 为名，ID (P1, M1...) 为值的字典向量
 id_map <- setNames(cli_full$ID, cli_full$Original_Sample_ID)
@@ -267,12 +268,6 @@ ggplot(meat, aes(x=x, y=number, group = 1)) +
         panel.border = element_blank())
 
 meta = scRNA@meta.data
-meta = meta[,c(1,9)]
-for (i in 1:nrow(meat)) {
-  x = meat[i,1]
-  y = meat[i,2]
-  meta$orig.ident[which(meta$orig.ident == y)] <- x
-}
 
 meta$x <- factor(meta$orig.ident,levels=c("P1","P2","P3","P4","P5",
                                           "P6","P7","P8","P9","P10",
