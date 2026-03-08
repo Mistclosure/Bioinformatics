@@ -84,7 +84,7 @@ testdata <- GetAssayData(scRNA, assay = "SCT", layer = "data")
 clusters <- scRNA@meta.data$seurat_clusters
 cellpred <- SingleR(test = testdata, ref = refdata, labels =
                       refdata$label.main,
-                     clusters = clusters,
+                    clusters = clusters,
                     assay.type.test = "logcounts", assay.type.ref =
                       "logcounts")
 celltype = data.frame(ClusterID=rownames(cellpred),
@@ -108,25 +108,22 @@ raw_counts <- GetAssayData(scRNA, assay = "RNA", layer = "counts")
 colnames(raw_counts) <- paste0(colnames(raw_counts), "___", scRNA$orig.ident)
 
 
-# ==================== 新增：分两组运行与合并的核心代码 ====================
+# ==================== 修改：按 orig.ident 分批运行与合并的核心代码 ====================
 
-# 获取所有细胞名并设置随机种子进行打乱 
-# (随机打乱是为了保证分出的这 2 组中，每一组都有混合的正常细胞作为对照)
-set.seed(42) 
-all_cells <- sample(colnames(raw_counts))
+# 获取所有唯一的样本/批次 ID (如 C1, P1)
+sample_ids <- unique(scRNA$orig.ident)
 
-# 将打乱后的细胞列名均分为 2 组
-cell_groups <- split(all_cells, cut(seq_along(all_cells), 2, labels = FALSE))
-
-# 初始化一个空列表，用于存放两组的预测结果
+# 初始化一个空列表，用于存放各组的预测结果
 pred_list <- list()
 
-# 循环运行 2 次 CopyKAT
-for (i in 1:2) {
-  print(paste0("========== 正在运行第 ", i, " 组 (共 2 组) =========="))
+# 循环运行每一个批次/样本
+for (i in seq_along(sample_ids)) {
+  current_id <- sample_ids[i]
+  print(paste0("========== 正在运行第 ", i, " 组 (共 ", length(sample_ids), " 组): ", current_id, " =========="))
   
-  # 提取当前组的表达矩阵
-  sub_counts <- raw_counts[, cell_groups[[i]]]
+  # 根据 orig.ident 提取当前批次的表达矩阵
+  cell_idx <- which(scRNA$orig.ident == current_id)
+  sub_counts <- raw_counts[, cell_idx, drop = FALSE]
   
   # 运行 CopyKAT
   sub_copykat_res <- copykat(
@@ -135,27 +132,32 @@ for (i in 1:2) {
     ngene.chr = 5,            
     win.size = 25,            
     KS.cut = 0.1,             
-    sam.name = paste0("lung_cancer_part", i), # 区分输出文件前缀，避免覆盖
+    sam.name = paste0("copykat_", current_id), # 使用具体的 orig.ident 作为输出文件前缀
     distance = "euclidean", 
-    n.cores = 16               
+    n.cores = 32               
   )
   
   # 提取当前组的预测结果并存入列表
-  pred_list[[i]] <- as.data.frame(sub_copykat_res$prediction)
+  # (加入了一个小的防错机制，以防个别细胞过少的样本跑不出结果而中断循环)
+  if (!is.null(sub_copykat_res) && "prediction" %in% names(sub_copykat_res)) {
+    pred_list[[current_id]] <- as.data.frame(sub_copykat_res$prediction)
+  } else {
+    print(paste0("警告：样本 ", current_id, " 未能返回有效预测结果，已跳过。"))
+  }
   
   # 主动释放内存，防止后续循环爆内存
   rm(sub_counts, sub_copykat_res)
   gc()
 }
 
-print("========== 两组运行完毕，正在合并预测结果 ==========")
+print("========== 所有分组运行完毕，正在合并预测结果 ==========")
 
-# 将 2 组的预测结果按行合并为一个完整的数据框
+# 将所有组的预测结果按行合并为一个完整的数据框
 pred <- do.call(rbind, pred_list)
 # 保存合并后的预测结果以防万一
 save(pred, file = 'copykat_merged_pred.Rdata')
 
-# ==================== 新增结束 ====================
+# ==================== 修改结束 ====================
 
 
 # ==================== 以下为未修改的原始代码 ====================
@@ -265,7 +267,7 @@ ggplot(meat, aes(x=x, y=number, group = 1)) +
         panel.border = element_blank())
 
 meta = scRNA@meta.data
-meta = meta[,c(1,10)]
+meta = meta[,c(1,9)]
 for (i in 1:nrow(meat)) {
   x = meat[i,1]
   y = meat[i,2]
@@ -278,7 +280,7 @@ meta$x <- factor(meta$orig.ident,levels=c("P1","P2","P3","P4","P5",
                                           "P16","P17","M1","M2","M3",
                                           "M4","M5","M6","M7","M8",
                                           "M9","M10","C1","C2","C3"))
-ggplot(data = meta, aes(x = x, fill =singleR1))+
+ggplot(data = meta, aes(x = x, fill =singleR))+
   geom_bar(stat = 'count',position = 'fill')+labs(y = "Cell\nProportion(%)" , x="")+
   scale_fill_manual(values = c( "#80B1D3","#BC80BD" , "#FB8072"
                                 ,"#8DD3C7", "#FFFFB3",
