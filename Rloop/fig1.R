@@ -305,15 +305,16 @@ library(limma)
 Malignant=read.table("Malignant cells.txt", header=T, sep="\t",
                      check.names=F, row.names=1)
 pbmc1 = scRNA[,Malignant[,1]]
-Count = as.data.frame(pbmc1@assays[["RNA"]]@counts)
+pbmc1 <- JoinLayers(pbmc1, assay = "RNA")
+Count = as.data.frame(GetAssayData(pbmc1, assay = "RNA", layer = "counts"))
 meta = pbmc1@meta.data
 pbmc1 <- CreateSeuratObject(counts = Count)
-pbmc1@meta.data$Type = B$orig.ident
+pbmc1@meta.data$Type = meta$orig.ident
 ### SCT
 pbmc1 <- SCTransform(pbmc1)
 #PCA
 pbmc1 <- RunPCA(pbmc1, features = VariableFeatures(object = pbmc1))
-pbmc1 <- RunTSNE(pbmc1, dims=pc.num) %>% RunUMAP(dims=1:20)
+pbmc1 <- RunTSNE(pbmc1, dims=1:20) %>% RunUMAP(dims=1:20)
 pbmc1 <- FindNeighbors(pbmc1, dims = 1:20)
 pbmc1 <- FindClusters(pbmc1, resolution = 1)
 DimPlot(pbmc1, reduction = "umap")
