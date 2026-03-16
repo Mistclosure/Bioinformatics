@@ -80,7 +80,7 @@ ssgsea_param <- ssgseaParam(
 # 2. 调用 gsva 函数，并传入参数对象和并行计算设置
 ssgseaScore <- gsva(
   ssgsea_param, 
-  BPPARAM = MulticoreParam(workers = 32) # 开启 8 核心并行计算
+  BPPARAM = MulticoreParam(workers = 12) # 开启 8 核心并行计算
 )
 
 # 定义归一化函数
