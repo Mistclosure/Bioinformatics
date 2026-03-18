@@ -73,10 +73,12 @@ A = scRNA@meta.data
 # 1. 计算每个样本的平均分
 sample_avg <- aggregate(score ~ orig.ident, data = A, FUN = mean)
 colnames(sample_avg) <- c("SampleID", "Score")
-
+write.table(sample_avg, file = "Rloopscore.txt", 
+            sep = "\t", quote = FALSE, row.names = T)
 # 2. 根据样本平均分的中位数划分为 High/Low (对接你图中的 Type)
 sample_avg$Type <- ifelse(sample_avg$Score > median(sample_avg$Score), "High", "Low")
 rownames(sample_avg) <- sample_avg$SampleID
+
 rt = merge(sample_avg, data, by.x = 0, by.y = 0)
 rt3 = rt[, c(4, 6)]
 colnames(rt3) = c("Type", "Expression")
