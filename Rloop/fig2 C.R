@@ -46,7 +46,7 @@ my_colors <- c("#8DD3C7", "#FFFFB3", "#FB8072", "#BEBADA", "#80B1D3", "#FDB462",
 a %>%
   drop_na() %>%
   ggplot(aes(fill = Var2, y = percent, x = Var1)) +
-  geom_bar(position = "fill", stat = "identity",width = 0.6) +
+  geom_bar(position = "fill", stat = "identity",width = 0.2) +
   # 使用我们定义的 14 色板
   scale_fill_manual(values = my_colors) + 
   scale_y_continuous(labels = scales::percent) +
