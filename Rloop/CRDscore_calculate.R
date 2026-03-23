@@ -14,12 +14,13 @@ pbmc1 <- NormalizeData(pbmc1,assay = 'RNA')
 # 如果你的对象是合并过的，v5 建议先 JoinLayers 确保数据完整
 
 # 使用 LayerData 提取 counts (等同于 v4 的 @assays$RNA@counts)
-exp = as.data.frame(LayerData(pbmc1, assay = "RNA", layer = "data"))
+exp = as.data.frame(LayerData(pbmc1, assay = "RNA", layer = "counts"))
 
 # 2. 提取 Rloop.csv 中的基因集
-rloop_data = read.csv("genes2.csv", header = T, check.names = F)
+rloop_data = read.csv("Rloop.csv", header = T, check.names = F)
+#target_genes =c('CXCL9', 'CXCL10', 'CXCL11', 'CXCR3', 'CD3', 'CD4', 'CD8a','CD8', 'CD8b', 'CD274', 'PDCD1', 'CXCR4', 'CCL5')
 # 提取 GeneSymbol 列的前 92 个基因
-target_genes = as.character(rloop_data$Gene[1:100])
+target_genes = as.character(rloop_data$Gene[1:92])
 # 建议加上交集判断，防止打分函数因为找不到基因而报错
 target_genes = intersect(target_genes, rownames(pbmc1))
 
@@ -50,7 +51,7 @@ rt1 = merge(score, rt, by.x = "id", by.y = "id")
 
 # --- 绘图部分 1 (Column 12) ---
 # 注意：由于 merge 后列顺序改变，建议检查 rt1 的列名以确保索引正确
-data = rt1[,c(2,17)]
+data = rt1[,c(2,16)]
 colnames(data) = c("score","Type")
 group=levels(factor(data$Type))
 data$Type=factor(data$Type, levels=group)
@@ -69,8 +70,8 @@ ggplot(data,aes(x = Type , y=score, color=Type))+
   theme(panel.grid=element_blank())+
   stat_compare_means(comparisons = my_comparisons,method = "wilcox.test")+
   theme(legend.position = "none")+
-  ggtitle("") +
-  ylim(-0.4, 0.4) +
+  ggtitle("Rloop counts") +
+  ylim(-5, 5) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))+
   ylab("RloopScore")+
   theme(axis.title.x=element_blank(),
