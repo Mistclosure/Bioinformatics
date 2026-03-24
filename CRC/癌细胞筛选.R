@@ -26,32 +26,21 @@ raw_counts <- GetAssayData(scRNA, assay = "RNA", layer = "counts")
 colnames(raw_counts) <- paste0(colnames(raw_counts), "___", scRNA$orig.ident)
 
 
-# ==================== 修改：按 orig.ident 分为两大部分运行与合并的核心代码 ====================
+# ==================== 修改：按 orig.ident 分批运行与合并的核心代码 ====================
 
-# 获取所有唯一的样本/批次 ID
+# 获取所有唯一的样本/批次 ID (如 C1, P1)
 sample_ids <- unique(scRNA$orig.ident)
 
-# 将批次尽量平均分为两大部分
-mid_idx <- ceiling(length(sample_ids) / 2)
-batch1_ids <- sample_ids[1:mid_idx]
-batch2_ids <- sample_ids[(mid_idx + 1):length(sample_ids)]
-
-# 将两部分存入列表以便循环
-split_batches <- list(Part1 = batch1_ids, Part2 = batch2_ids)
-
-# 初始化一个空列表，用于存放两大部分的预测结果
+# 初始化一个空列表，用于存放各组的预测结果
 pred_list <- list()
 
-# 循环运行这两大批次
-for (i in seq_along(split_batches)) {
-  current_batch_name <- names(split_batches)[i]
-  current_batch_ids <- split_batches[[i]]
+# 循环运行每一个批次/样本
+for (i in seq_along(sample_ids)) {
+  current_id <- sample_ids[i]
+  print(paste0("========== 正在运行第 ", i, " 组 (共 ", length(sample_ids), " 组): ", current_id, " =========="))
   
-  print(paste0("========== 正在运行 ", current_batch_name, " (共2部分) =========="))
-  print(paste0("当前部分包含的样本: ", paste(current_batch_ids, collapse=", ")))
-  
-  # 提取当前部分的细胞 barcode 索引
-  cell_idx <- which(scRNA$orig.ident %in% current_batch_ids)
+  # 根据 orig.ident 提取当前批次的表达矩阵
+  cell_idx <- which(scRNA$orig.ident == current_id)
   sub_counts <- raw_counts[, cell_idx, drop = FALSE]
   
   # 运行 CopyKAT
@@ -61,29 +50,31 @@ for (i in seq_along(split_batches)) {
     ngene.chr = 5,            
     win.size = 25,            
     KS.cut = 0.1,             
-    sam.name = paste0("copykat_", current_batch_name), # 输出前缀改为 Part1/Part2
+    sam.name = paste0("copykat_", current_id), # 使用具体的 orig.ident 作为输出文件前缀
     distance = "euclidean", 
-    n.cores = 16               
+    n.cores = 32               
   )
   
-  # 提取当前大部分的预测结果并存入列表
+  # 提取当前组的预测结果并存入列表
+  # (加入了一个小的防错机制，以防个别细胞过少的样本跑不出结果而中断循环)
   if (!is.null(sub_copykat_res) && "prediction" %in% names(sub_copykat_res)) {
-    pred_list[[current_batch_name]] <- as.data.frame(sub_copykat_res$prediction)
+    pred_list[[current_id]] <- as.data.frame(sub_copykat_res$prediction)
   } else {
-    print(paste0("警告：", current_batch_name, " 未能返回有效预测结果，已跳过。"))
+    print(paste0("警告：样本 ", current_id, " 未能返回有效预测结果，已跳过。"))
   }
   
-  # 主动释放内存，清理当前大部分的稠密矩阵和运行结果
+  # 主动释放内存，防止后续循环爆内存
   rm(sub_counts, sub_copykat_res)
   gc()
 }
 
-print("========== 两大部分运行完毕，正在合并预测结果 ==========")
+print("========== 所有分组运行完毕，正在合并预测结果 ==========")
 
-# 将两部分的预测结果按行合并为一个完整的数据框
+# 将所有组的预测结果按行合并为一个完整的数据框
 pred <- do.call(rbind, pred_list)
 # 保存合并后的预测结果以防万一
 save(pred, file = 'copykat_merged_pred.Rdata')
+
 # ==================== 修改结束 ====================
 
 
