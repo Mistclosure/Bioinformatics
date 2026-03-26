@@ -19,6 +19,7 @@ scRNA <- SCTransform(scRNA,
                      method = "glmGamPoi", 
                      vst.flavor = "v2", 
                      vars.to.regress = "percent.mt", 
+                     conserve.memory = TRUE, # 核心参数：牺牲时间换空间
                      verbose = FALSE)
 
 ### PCA
@@ -40,7 +41,7 @@ scRNA <- FindClusters(scRNA, resolution = 1.5)
 cluster <- read.csv("crc10x_full_c295v4_submit_cluster.csv", header = TRUE, sep = ",", stringsAsFactors = FALSE)
 
 scRNA@meta.data$cluster <- cluster$clMidwayPr[match(colnames(scRNA),cluster$sampleID)]
-save(scRNA,'scRNA.Rdata')
+save(scRNA,file = 'scRNA.Rdata')
 # 1. 加载所需的包
 library(copykat)
 library(dplyr)
@@ -158,7 +159,7 @@ Malignant = read.table("Malignant cells.txt", header=T, sep="\t", check.names=F,
 pbmc1 = scRNA[, rownames(Malignant)] 
 
 # 2. 合并 Layers 并进行 SCTransform (重复全量数据的 SCT 逻辑)
-pbmc1 <- JoinLayers(pbmc1)
+#pbmc1 <- JoinLayers(pbmc1)
 # 建议：加入 method = "glmGamPoi" 提速，加入 vars.to.regress 回归线粒体影响
 pbmc1 <- SCTransform(pbmc1, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = FALSE)
 
