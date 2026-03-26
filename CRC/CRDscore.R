@@ -30,18 +30,14 @@ score = as.data.frame(score)
 score = cbind(id=rownames(score), score)
 # 核心修改：score 的拆分处理（格式与 meta 一致）
 score$id = rownames(score)
-score$Original_Sample_ID = sub("^[^_]*_", "", rownames(score))
-
 # 提取 metadata 并添加细胞 ID 列（id）和拆分出的患者 ID 列（Original_Sample_ID）
 meta = pbmc1@meta.data
 meta$id = rownames(meta) 
-meta$Original_Sample_ID = sub("^[^_]*_", "", rownames(meta))
-
 # 读取 Cli.csv 文件
 cli = read.csv("Cli.csv", header=T, check.names=F)
 
 # 1. 按照患者 ID 合并细胞元数据与临床信息
-rt = merge(meta, cli, by.x= "Type",by.y="ID")
+rt = merge(meta, cli, by.x= "orig.ident",by.y="PatientBarcode")
 
 # 2. 按照细胞 ID 合并评分结果与上一步的合并表
 # 合并依旧按照指定列名的方式
