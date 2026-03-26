@@ -8,10 +8,39 @@ library(celldex)
 data <- Read10X_h5("GSE178341_crc10x_full_c295v4_submit.h5")
 scRNA = CreateSeuratObject(data, min.cells = 3, project =
                              "GSE178341",min.features =300)
+# 计算线粒体比例 (这是优化的前提)
+scRNA[["percent.mt"]] <- PercentageFeatureSet(scRNA, pattern = "^MT-")
+
+### SCT 优化
+# 1. method = "glmGamPoi" 大幅提速
+# 2. vst.flavor = "v2" 提高准确性
+# 3. vars.to.regress = "percent.mt" 消除线粒体干扰
+scRNA <- SCTransform(scRNA, 
+                     method = "glmGamPoi", 
+                     vst.flavor = "v2", 
+                     vars.to.regress = "percent.mt", 
+                     verbose = FALSE)
+
+### PCA
+scRNA <- RunPCA(scRNA, npcs=50, verbose=FALSE)
+
+### Harmony
+# 维持原样，SCT 配合 Harmony 效果很好
+scRNA <- RunHarmony(scRNA, group.by.vars="orig.ident", 
+                    max.iter.harmony = 20, assay.use = "SCT")
+
+pc.num=1:30
+scRNA <- RunTSNE(scRNA, reduction="harmony", dims=pc.num) %>%
+  RunUMAP(reduction="harmony", dims=pc.num)
+
+# FindNeighbors 增加 reduction="harmony" 显式指定，确保分群是基于矫正后的数据
+scRNA <- FindNeighbors(scRNA, reduction="harmony", dims = pc.num)
+scRNA <- FindClusters(scRNA, resolution = 1.5)
 # 读取 CSV 文件
 cluster <- read.csv("crc10x_full_c295v4_submit_cluster.csv", header = TRUE, sep = ",", stringsAsFactors = FALSE)
 
 scRNA@meta.data$cluster <- cluster$clMidwayPr[match(colnames(scRNA),cluster$sampleID)]
+save(scRNA,'scRNA.Rdata')
 # 1. 加载所需的包
 library(copykat)
 library(dplyr)
@@ -52,7 +81,7 @@ for (i in seq_along(sample_ids)) {
     KS.cut = 0.1,             
     sam.name = paste0("copykat_", current_id), # 使用具体的 orig.ident 作为输出文件前缀
     distance = "euclidean", 
-    n.cores = 32               
+    n.cores = 16               
   )
   
   # 提取当前组的预测结果并存入列表
@@ -93,7 +122,7 @@ malig_counts <- as.data.frame(table(malig_ids))
 colnames(malig_counts) <- c("id", "number")
 
 # 读取你的 Cli.csv (包含 ID 和 Original_Sample_ID)
-cli_full <- read.csv("Cli.csv", header = TRUE)
+cli_full <- read.csv("GSE178341_crc10x_full_c295v4_submit_metatables.csv", header = TRUE)
 
 # 通过 id (P1, M1) 将统计结果合并进表格，保证所有临床样本都在
 meat <- merge(cli_full[, c("ID", "Original_Sample_ID")], malig_counts, 
@@ -118,3 +147,48 @@ malig_df <- data.frame(Barcode = malig_barcodes, row.names = malig_barcodes)
 write.table(malig_df, file = "Malignant cells.txt", 
             sep = "\t", quote = FALSE, col.names = TRUE)
 print("恶性细胞列表文件 (Malignant cells.txt) 已生成完毕！")
+
+# ==================== 针对恶性细胞子集 (pbmc1) 的完整重跑流程 ====================
+
+library(limma)
+# 1. 读取恶性细胞列表并提取子集
+Malignant = read.table("Malignant cells.txt", header=T, sep="\t", check.names=F, row.names=1)
+
+# 确保从含有完整 metadata 的 scRNA 中提取
+pbmc1 = scRNA[, rownames(Malignant)] 
+
+# 2. 合并 Layers 并进行 SCTransform (重复全量数据的 SCT 逻辑)
+pbmc1 <- JoinLayers(pbmc1)
+# 建议：加入 method = "glmGamPoi" 提速，加入 vars.to.regress 回归线粒体影响
+pbmc1 <- SCTransform(pbmc1, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = FALSE)
+
+# 3. 准备 RNA 层 (专门用于你后续要跑的 CDSscore)
+DefaultAssay(pbmc1) <- "RNA"
+pbmc1 <- NormalizeData(pbmc1)
+pbmc1 <- ScaleData(pbmc1)
+
+# 4. 重新跑 PCA (基于子集的高变基因)
+DefaultAssay(pbmc1) <- "SCT" # 降维必须回到 SCT
+pbmc1 <- RunPCA(pbmc1, npcs = 50, verbose = FALSE)
+
+# 5. 重新跑 Harmony (核心修改：纠正恶性细胞内部的病人差异)
+pbmc1 <- RunHarmony(pbmc1, group.by.vars = "orig.ident", 
+                    assay.use = "SCT", max.iter.harmony = 20)
+
+# 6. 重新跑降维与聚类 (基于 harmony 空间)
+pc.num = 1:20 # 根据你之前设置的 20 个 dims
+pbmc1 <- RunTSNE(pbmc1, reduction = "harmony", dims = pc.num) %>%
+  RunUMAP(reduction = "harmony", dims = pc.num)
+
+pbmc1 <- FindNeighbors(pbmc1, reduction = "harmony", dims = pc.num)
+pbmc1 <- FindClusters(pbmc1, resolution = 1)
+
+# 7. 可视化检查
+# 此时建议分别按 cluster 和你之前的 MetastasisStatus 观察
+p1 <- DimPlot(pbmc1, reduction = "umap", label = TRUE) + NoLegend()
+p2 <- DimPlot(pbmc1, reduction = "umap", group.by = "orig.ident") # 检查 Harmony 效果
+
+# 保存结果
+save(pbmc1, file = 'Malignant.Rdata')
+
+# ==================== 修改结束 ====================
