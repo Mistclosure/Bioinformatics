@@ -15,17 +15,17 @@ load("Malignant.Rdata")
 exp = as.data.frame(LayerData(pbmc1, assay = "RNA", layer = "data"))
 
 # 2. 提取 Rloop.csv 中的基因集
-rloop_data = read.csv("genes1.csv", header = T, check.names = F)
+CRC_data = read.csv("genes1.csv", header = T, check.names = F)
 #target_genes =c('CXCL9', 'CXCL10', 'CXCL11', 'CXCR3', 'CD3', 'CD4', 'CD8a','CD8', 'CD8b', 'CD274', 'PDCD1', 'CXCR4', 'CCL5')
 # 提取 GeneSymbol 列的前 92 个基因
-target_genes = as.character(rloop_data$Gene[1:50])
+target_genes = as.character(CRC_data$Genes[1:50])
 # 建议加上交集判断，防止打分函数因为找不到基因而报错
 target_genes = intersect(target_genes, rownames(pbmc1))
 
 # 3. 计算评分
 score <- cal_CRDscore(expr = exp, n.bins = 50, circadians = 
                         target_genes, study.type = "scRNAseq")
-
+gc()
 score = as.data.frame(score)
 score = cbind(id=rownames(score), score)
 # 核心修改：score 的拆分处理（格式与 meta 一致）
@@ -45,7 +45,7 @@ rt1 = merge(score, rt, by.x = "id", by.y = "id")
 
 # --- 绘图部分 1 (Column 12) ---
 # 注意：由于 merge 后列顺序改变，建议检查 rt1 的列名以确保索引正确
-data = rt1[,c(2,16)]
+data = rt1[,c(2,27)]
 colnames(data) = c("score","Type")
 group=levels(factor(data$Type))
 data$Type=factor(data$Type, levels=group)
@@ -65,7 +65,7 @@ ggplot(data,aes(x = Type , y=score, color=Type))+
   stat_compare_means(comparisons = my_comparisons,method = "wilcox.test")+
   theme(legend.position = "none")+
   ggtitle("Rloop counts") +
-  ylim(-5, 5) +
+  ylim(-0.4, 0.4) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))+
   ylab("RloopScore")+
   theme(axis.title.x=element_blank(),
